@@ -39,15 +39,13 @@ class ResponseConfig:
     # an analyst. The one knob DAEMON_CONFIDENCE_THRESHOLD has always named.
     confidence_threshold: float = 0.90
     # The "quick review" line: the correlator recommends isolation with
-    # approval, investigate_and_respond acts, and the processor queues a finding
-    # for response at or above it.
+    # approval, and the processor queues a finding for response, at or above it.
     review_threshold: float = 0.85
     # Below this the recommendation is to keep monitoring rather than act.
     monitor_threshold: float = 0.70
     # Severity-conditioned floors the daemon responder applies even below
     # confidence_threshold: a critical finding is isolated, and a high one
-    # investigated (or rated high by the correlator when indicators back it),
-    # at or above these.
+    # investigated, at or above these.
     critical_action_floor: float = 0.70
     high_action_floor: float = 0.80
     force_manual_approval: bool = False

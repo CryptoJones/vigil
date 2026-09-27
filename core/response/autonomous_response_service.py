@@ -1,20 +1,14 @@
 """Autonomous response service with approval workflow integration."""
 
-import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.agents.builtins import AgentId
 from core.response.approval_service import ActionStatus, ActionType, ApprovalService
-from core.response.config import ResponseConfig, decision_rule
-from core.time import utcnow
+from core.response.config import ResponseConfig
 
 logger = logging.getLogger(__name__)
-
-
-# Escalation callback type
-EscalationCallback = Callable[[Dict[str, Any], str, str], None]
 
 
 class AutonomousResponseService:
@@ -32,181 +26,6 @@ class AutonomousResponseService:
         """
         self.approval_service = approvals or ApprovalService(config=config)
         self.config = config or self.approval_service.config
-        self._escalation_callbacks: List[EscalationCallback] = []
-
-    def register_escalation_callback(self, callback: EscalationCallback):
-        """Register a callback for escalation events."""
-        self._escalation_callbacks.append(callback)
-        logger.info(f"Registered escalation callback: {callback.__name__}")
-
-    def unregister_escalation_callback(self, callback: EscalationCallback):
-        """Unregister an escalation callback."""
-        if callback in self._escalation_callbacks:
-            self._escalation_callbacks.remove(callback)
-            logger.info(f"Unregistered escalation callback: {callback.__name__}")
-
-    def _trigger_escalation(
-        self, data: Dict[str, Any], severity: str, action_type: str
-    ):
-        """Trigger all registered escalation callbacks."""
-        for callback in self._escalation_callbacks:
-            try:
-                callback(data, severity, action_type)
-            except Exception as e:
-                logger.error(f"Escalation callback error: {e}")
-
-    async def escalate_to_slack(
-        self, message: str, severity: str, channel: Optional[str] = None
-    ):
-        """Send escalation to Slack channel."""
-        try:
-            import httpx
-
-            from core.config import get_integration_config
-
-            config = get_integration_config("slack")
-            token = config.get("bot_token")
-
-            if not token:
-                logger.warning("Slack not configured for escalation")
-                return False
-
-            target_channel = channel or config.get("default_channel", "#soc-alerts")
-            color_map = {
-                "critical": "#ff0000",
-                "high": "#ff9900",
-                "medium": "#ffcc00",
-                "low": "#36a64f",
-            }
-
-            # Blocking POST inside an async method — offload it.
-            response = await asyncio.to_thread(
-                httpx.post,
-                "https://slack.com/api/chat.postMessage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "channel": target_channel,
-                    "attachments": [
-                        {
-                            "color": color_map.get(severity.lower(), "#808080"),
-                            "title": f"🚨 SOC Alert - {severity.upper()}",
-                            "text": message,
-                            "footer": "AI-SOC Autonomous Response",
-                            "ts": utcnow().timestamp(),
-                        }
-                    ],
-                },
-                timeout=30,
-                # requests followed redirects by default; httpx does not.
-                follow_redirects=True,
-            )
-
-            if response.status_code == 200 and response.json().get("ok"):
-                logger.info(f"Slack escalation sent to {target_channel}")
-                return True
-            else:
-                logger.warning(f"Slack escalation failed: {response.text}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Slack escalation error: {e}")
-            return False
-
-    async def escalate_to_pagerduty(self, title: str, details: str, severity: str):
-        """Send escalation to PagerDuty."""
-        try:
-            import httpx
-
-            from core.config import get_integration_config
-
-            config = get_integration_config("pagerduty")
-            routing_key = config.get("routing_key") or config.get("integration_key")
-
-            if not routing_key:
-                logger.warning("PagerDuty not configured for escalation")
-                return False
-
-            severity_map = {
-                "critical": "critical",
-                "high": "error",
-                "medium": "warning",
-                "low": "info",
-            }
-
-            # Blocking POST inside an async method — offload it.
-            response = await asyncio.to_thread(
-                httpx.post,
-                "https://events.pagerduty.com/v2/enqueue",
-                json={
-                    "routing_key": routing_key,
-                    "event_action": "trigger",
-                    "payload": {
-                        "summary": title,
-                        "source": "ai-soc-autonomous-response",
-                        "severity": severity_map.get(severity.lower(), "warning"),
-                        "custom_details": {"details": details},
-                    },
-                },
-                timeout=30,
-                # requests followed redirects by default; httpx does not.
-                follow_redirects=True,
-            )
-
-            data = response.json()
-            if data.get("status") == "success":
-                logger.info(f"PagerDuty alert triggered: {data.get('dedup_key')}")
-                return True
-            else:
-                logger.warning(f"PagerDuty escalation failed: {data}")
-                return False
-
-        except Exception as e:
-            logger.error(f"PagerDuty escalation error: {e}")
-            return False
-
-    async def escalate_action(
-        self,
-        action_data: Dict[str, Any],
-        severity: str,
-        channels: Optional[List[str]] = None,
-    ):
-        """Escalate an action through configured channels."""
-        channels = channels or ["slack", "pagerduty"]
-
-        title = action_data.get("title", "Autonomous Response Action")
-        description = action_data.get("description", "")
-        target = action_data.get("target", "unknown")
-        confidence = action_data.get("confidence", 0)
-
-        message = f"""
-**Action Required:** {title}
-**Target:** {target}
-**Severity:** {severity.upper()}
-**Confidence:** {confidence:.1%}
-
-{description}
-
-Please review and approve/reject in the SOC dashboard.
-""".strip()
-
-        results = {}
-
-        if "slack" in channels:
-            results["slack"] = await self.escalate_to_slack(message, severity)
-
-        if "pagerduty" in channels and severity in ["critical", "high"]:
-            results["pagerduty"] = await self.escalate_to_pagerduty(
-                title, message, severity
-            )
-
-        # Trigger callbacks
-        self._trigger_escalation(action_data, severity, "escalate_action")
-
-        logger.info(f"Escalation results for {target}: {results}")
-        return results
 
     def correlate_alerts(
         self,
@@ -403,59 +222,17 @@ Please review and approve/reject in the SOC dashboard.
                 logger.info(
                     f"Action {action.action_id} pending approval (confidence: {confidence:.2%})"
                 )
-
-                # Trigger escalation for pending actions
-                severity = self._determine_severity_from_confidence(
-                    confidence, correlation_data
-                )
-                escalation_data = {
-                    "action_id": action.action_id,
-                    "title": action.title,
-                    "description": action.description,
-                    "target": ip_address,
-                    "hostname": hostname,
-                    "confidence": confidence,
-                    "indicators": correlation_data.get("indicators", []),
-                    "evidence": evidence,
-                }
-                self._trigger_escalation(escalation_data, severity, "pending_approval")
-
                 return {
                     "status": "pending_approval",
                     "action_id": action.action_id,
                     "message": "Isolation action created, awaiting analyst approval",
                     "confidence": confidence,
                     "requires_approval": True,
-                    "escalation_triggered": True,
                 }
 
         except Exception as e:
             logger.error(f"Error creating isolation action: {e}")
             return {"error": str(e)}
-
-    def _determine_severity_from_confidence(
-        self, confidence: float, correlation_data: Dict
-    ) -> str:
-        """Determine severity level from confidence and indicators."""
-        indicators = correlation_data.get("indicators", [])
-
-        # Critical indicators
-        if any(ind in indicators for ind in ["ransomware", "malware"]):
-            return "critical"
-
-        # High confidence + C2 or lateral movement
-        if confidence >= self.config.high_action_floor and any(
-            ind in indicators for ind in ["c2_communication", "lateral_movement"]
-        ):
-            return "high"
-
-        # Based on confidence
-        if confidence >= self.config.review_threshold:
-            return "high"
-        elif confidence >= self.config.monitor_threshold:
-            return "medium"
-        else:
-            return "low"
 
     def _execute_isolation(
         self, ip_address: str, hostname: Optional[str], reason: str, confidence: float
@@ -497,8 +274,6 @@ Please review and approve/reject in the SOC dashboard.
             List of execution results
         """
         try:
-            from core.response.approval_service import ActionStatus
-
             # Get approved but not executed actions
             approved_actions = self.approval_service.list_actions(
                 status=ActionStatus.APPROVED
@@ -557,84 +332,6 @@ Please review and approve/reject in the SOC dashboard.
         except Exception as e:
             logger.error(f"Error executing approved actions: {e}")
             return []
-
-    def investigate_and_respond(
-        self, finding_id: str, auto_execute: bool = True
-    ) -> Dict:
-        """
-        Full investigation and response workflow for a finding.
-
-        Args:
-            finding_id: Finding ID to investigate
-            auto_execute: Whether to auto-execute high-confidence actions
-
-        Returns:
-            Investigation and response result
-        """
-        try:
-            # Load finding
-            from core.storage.database_data_service import DatabaseDataService
-
-            data_service = DatabaseDataService()
-            finding = data_service.get_finding(finding_id)
-
-            if not finding:
-                return {"error": f"Finding {finding_id} not found"}
-
-            # Extract entity information
-            entity_context = finding.get("entity_context", {})
-            src_ips = entity_context.get("src_ips", [])
-            hostnames = entity_context.get("hostnames", [])
-
-            if not src_ips:
-                return {"error": "No source IPs found in finding"}
-
-            target_ip = src_ips[0]
-            target_hostname = hostnames[0] if hostnames else None
-
-            # Correlate with multiple sources
-            correlation = self.correlate_alerts(
-                tempo_flow_alert=finding,
-                crowdstrike_alert=None,  # Would fetch from CrowdStrike in production
-                splunk_results=None,  # Would fetch from Splunk in production
-            )
-
-            # Determine action
-            confidence = correlation["confidence"]
-            rule = decision_rule(
-                "response.review_threshold", self.config.review_threshold, confidence
-            )
-            reason = rule if auto_execute else "auto_execute disabled"
-
-            if confidence >= self.config.review_threshold and auto_execute:
-                # Create isolation action
-                action_result = self.create_isolation_action(
-                    ip_address=target_ip,
-                    hostname=target_hostname,
-                    confidence=confidence,
-                    reason=f"Automated response to finding {finding_id}; {rule}",
-                    evidence=[finding_id],
-                    correlation_data=correlation,
-                )
-
-                return {
-                    "finding_id": finding_id,
-                    "target": target_ip,
-                    "correlation": correlation,
-                    "action": action_result,
-                }
-            else:
-                # Just report findings
-                return {
-                    "finding_id": finding_id,
-                    "target": target_ip,
-                    "correlation": correlation,
-                    "action": {"status": "no_action", "reason": reason},
-                }
-
-        except Exception as e:
-            logger.error(f"Error in investigate_and_respond: {e}")
-            return {"error": str(e)}
 
     # ------------------------------------------------------------------
     # Cloudflare action factories + executor
@@ -707,6 +404,3 @@ Please review and approve/reject in the SOC dashboard.
         except Exception as e:  # noqa: BLE001
             logger.exception("Cloudflare action %s failed", action_type)
             return {"success": False, "error": str(e)}
-
-
-# Singleton instance
