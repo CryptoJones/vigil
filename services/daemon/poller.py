@@ -735,7 +735,10 @@ class DataPoller:
         self.stats[f"{source}_polls"] += 1
         logger.debug("Polling %s for new %s...", label, noun)
 
-        result = service.ingest_alerts(limit=100)
+        # ingest_alerts() calls asyncio.run(), which raises RuntimeError while
+        # this loop is running. A worker thread also keeps the blocking SDK
+        # and ingest_finding writes off the daemon loop.
+        result = await asyncio.to_thread(service.ingest_alerts, limit=100)
 
         if not result.get("success"):
             # Raise rather than log: the loop is what counts an error and what
