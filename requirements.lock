@@ -437,7 +437,7 @@ urllib3==2.8.0
     #   sentry-sdk
 uv==0.12.6
     # via -r requirements.txt
-uvicorn==0.52.4
+uvicorn==0.54.0
     # via
     #   -r requirements.txt
     #   mcp
