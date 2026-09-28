@@ -1,6 +1,7 @@
 """Unit tests for core/integrations/elastic/client.py."""
 
 import json
+import ssl
 
 import pytest
 import httpx
@@ -71,6 +72,75 @@ class TestClientConstruction:
     def test_kibana_client_has_kbn_xsrf(self, service):
         client = service._build_kibana_client()
         assert client.headers["kbn-xsrf"] == "true"
+
+
+class TestCertificateVerification:
+
+    def test_verify_default_is_on(self):
+        assert ElasticService(elasticsearch_url=ES_URL)._verify() is True
+
+    def test_verify_off_when_operator_says_so(self, service):
+        assert service._verify() is False
+
+    def test_verify_off_wins_over_a_ca_path(self):
+        svc = ElasticService(
+            elasticsearch_url=ES_URL, verify_ssl=False, ca_cert_path="/etc/ca.pem"
+        )
+        assert svc._verify() is False
+
+    def test_blank_ca_path_means_the_system_store(self):
+        svc = ElasticService(elasticsearch_url=ES_URL, ca_cert_path="")
+        assert svc.ca_cert_path is None
+        assert svc._verify() is True
+
+    def test_ca_path_builds_a_context_for_both_clients(self, monkeypatch):
+        seen = []
+
+        def fake_context(cafile=None):
+            seen.append(cafile)
+            return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+        monkeypatch.setattr(ssl, "create_default_context", fake_context)
+        svc = ElasticService(
+            elasticsearch_url=ES_URL,
+            kibana_url=KIBANA_URL,
+            ca_cert_path="/etc/root-ca.pem",
+        )
+        assert isinstance(svc._verify(), ssl.SSLContext)
+        svc._build_es_client()
+        svc._build_kibana_client()
+        assert seen == ["/etc/root-ca.pem"] * 3
+
+    @pytest.mark.asyncio
+    async def test_unreadable_ca_path_fails_the_request_not_the_constructor(
+        self, tmp_path
+    ):
+        """The context is built per client, so a bad path is reported by the
+        call that needs it (test_connection, search) rather than raising while
+        the service is constructed."""
+        missing = tmp_path / "no-such-ca.pem"
+        svc = ElasticService(elasticsearch_url=ES_URL, ca_cert_path=str(missing))
+
+        ok, msg = await svc.test_connection()
+        assert ok is False
+        assert "no-such-ca.pem" in msg
+        assert "No such file" in msg
+
+        # search() swallows request failures, but a client it cannot build is
+        # raised so the tool server and federation see the path, not "failed".
+        with pytest.raises(OSError, match="no-such-ca.pem"):
+            await svc.search({"match_all": {}})
+        with pytest.raises(OSError, match="no-such-ca.pem"):
+            await svc.search_by_ip("1.2.3.4")
+
+    @pytest.mark.asyncio
+    async def test_a_file_that_is_not_a_certificate_is_reported(self, tmp_path):
+        junk = tmp_path / "junk.pem"
+        junk.write_text("not a certificate\n")
+        svc = ElasticService(elasticsearch_url=ES_URL, ca_cert_path=str(junk))
+        ok, msg = await svc.test_connection()
+        assert ok is False
+        assert "junk.pem" in msg
 
 
 # ------------------------------------------------------------------

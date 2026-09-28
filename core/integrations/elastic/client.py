@@ -1,7 +1,8 @@
 """Elastic Security / Elasticsearch API service for SIEM integration."""
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import ssl
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 
@@ -20,6 +21,7 @@ class ElasticService:
         password: Optional[str] = None,
         verify_ssl: bool = True,
         index_pattern: str = ".alerts-security.alerts-default",
+        ca_cert_path: Optional[str] = None,
     ):
         self.elasticsearch_url = elasticsearch_url.rstrip("/")
         self.kibana_url = (kibana_url or "").rstrip("/") or None
@@ -28,6 +30,7 @@ class ElasticService:
         self.password = password
         self.verify_ssl = verify_ssl
         self.index_pattern = index_pattern
+        self.ca_cert_path = ca_cert_path or None
 
         self._es_client: Optional[httpx.AsyncClient] = None
         self._kibana_client: Optional[httpx.AsyncClient] = None
@@ -35,6 +38,29 @@ class ElasticService:
     # ------------------------------------------------------------------
     # Client lifecycle
     # ------------------------------------------------------------------
+
+    def _verify(self) -> Union[bool, ssl.SSLContext]:
+        """What the clients check server certificates against.
+
+        A server signed by a private CA (a Wazuh indexer ships its own) is
+        trusted when the operator gives the CA's path. That file replaces the
+        default bundle for both clients rather than adding to it, so it must
+        also carry any public CA the other endpoint needs. Turning verification
+        off stays an explicit choice and wins over a path. The context is built
+        per client, so an unreadable path fails the request that needs it and
+        is reported there, not at construction.
+        """
+        if not self.verify_ssl:
+            return False
+        if self.ca_cert_path:
+            try:
+                return ssl.create_default_context(cafile=self.ca_cert_path)
+            except OSError as exc:  # ssl.SSLError is an OSError too
+                # ssl reports "No such file or directory" without the path.
+                raise OSError(
+                    f"CA certificate {self.ca_cert_path!r} not usable: {exc}"
+                ) from exc
+        return True
 
     def _build_es_client(self) -> httpx.AsyncClient:
         headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -47,7 +73,7 @@ class ElasticService:
             base_url=self.elasticsearch_url,
             headers=headers,
             auth=auth,
-            verify=self.verify_ssl,
+            verify=self._verify(),
             timeout=30.0,
         )
 
@@ -67,7 +93,7 @@ class ElasticService:
             base_url=self.kibana_url,
             headers=headers,
             auth=auth,
-            verify=self.verify_ssl,
+            verify=self._verify(),
             timeout=30.0,
         )
 
@@ -132,13 +158,19 @@ class ElasticService:
         size: int = 100,
         sort: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Run an Elasticsearch query and return the raw response body."""
+        """Run an Elasticsearch query and return the raw response body.
+
+        A request that fails returns None. A client that cannot be built (a
+        CA certificate path that is not usable) raises instead, so the caller
+        reports why rather than a bare "search failed".
+        """
         target = index or self.index_pattern
         body: Dict[str, Any] = {"query": query, "size": size}
         if sort:
             body["sort"] = sort
+        client = self.es_client
         try:
-            resp = await self.es_client.post(f"/{target}/_search", json=body)
+            resp = await client.post(f"/{target}/_search", json=body)
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:

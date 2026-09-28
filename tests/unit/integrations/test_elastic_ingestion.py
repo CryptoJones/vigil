@@ -122,6 +122,25 @@ class TestGetElasticService:
             assert svc is not None
             assert svc.verify_ssl is False
 
+    def test_ca_cert_path_reaches_the_client(self):
+        with patch("core.integrations.elastic.ingestion.resolve") as mock_resolve:
+            mock_resolve.return_value = {
+                "elasticsearch_url": "https://es.test:9200",
+                "kibana_url": None,
+                "api_key": None,
+                "username": "reader",
+                "password": "secret",
+                "index_pattern": "wazuh-alerts-4.x-*",
+                "verify_ssl": None,
+                "ca_cert_path": "/etc/vigil/certs/root-ca.pem",
+            }
+            ingestion = ElasticIngestion()
+            ingestion.ingestion_service = MagicMock()
+            svc = ingestion._get_elastic_service()
+            assert svc is not None
+            assert svc.verify_ssl is True
+            assert svc.ca_cert_path == "/etc/vigil/certs/root-ca.pem"
+
 
 class TestFetchAlerts:
 
