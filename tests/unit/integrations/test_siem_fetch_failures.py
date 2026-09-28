@@ -9,7 +9,7 @@ an enabled source that finds no credentials raises like any other outage.
 
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -192,11 +192,28 @@ async def test_sentinel_compares_aware_incident_times(fake_azure_sdk):
 
 
 @pytest.mark.asyncio
-async def test_elastic_without_kibana_is_not_a_failure():
+async def test_elastic_without_url_is_not_a_failure():
+    from core.integrations.elastic.ingestion import ElasticIngestion
+
+    with patch(
+        "core.integrations.elastic.ingestion.resolve",
+        return_value={"elasticsearch_url": None, "kibana_url": None},
+    ):
+        assert await ElasticIngestion().fetch_alerts() == []
+
+
+@pytest.mark.asyncio
+async def test_elastic_without_kibana_reads_the_index_and_raises_on_failure():
+    """No Kibana URL means the index is read directly (a Wazuh indexer), so an
+    unreachable indexer is an outage, not missing configuration."""
     from core.integrations.elastic.ingestion import ElasticIngestion
 
     with patch(
         "core.integrations.elastic.ingestion.resolve",
         return_value={"elasticsearch_url": "https://es.test:9200", "kibana_url": None},
     ):
-        assert await ElasticIngestion().fetch_alerts() == []
+        ingestion = ElasticIngestion()
+    svc = ingestion._get_elastic_service()
+    svc.search = AsyncMock(return_value=None)
+    with pytest.raises(RuntimeError, match="index search failed"):
+        await ingestion.fetch_alerts()
