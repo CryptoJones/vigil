@@ -30,17 +30,35 @@ _DOLLAR_TAG = re.compile(r"\$[A-Za-z_0-9]*\$")
 INSERT_TARGET = re.compile(
     r"INSERT\s+INTO\s+([\w.\"]+)\s*(?:\(([^)]*)\))?", re.IGNORECASE
 )
-_LEADING_COMMENTS = re.compile(r"(?:\s*--[^\n]*\n)*\s*")
 
 
 def split_statements(sql: str) -> Iterator[str]:
     """Split on top-level ';', treating one inside a single-quoted string or a
-    dollar-quoted ($tag$) body as literal so PL/pgSQL bodies stay whole."""
+    dollar-quoted ($tag$) body as literal so PL/pgSQL bodies stay whole.
+    Comments are dropped: an apostrophe in one ("don't") would otherwise open
+    a string and merge the statements after it."""
     buf: list[str] = []
     i, n = 0, len(sql)
     in_squote = False
     dollar_tag = None
     while i < n:
+        if dollar_tag is None and not in_squote:
+            if sql.startswith("--", i):
+                end = sql.find("\n", i)
+                i = n if end == -1 else end
+                continue
+            if sql.startswith("/*", i):
+                # Postgres block comments nest.
+                depth, i = 1, i + 2
+                while i < n and depth:
+                    if sql.startswith("/*", i):
+                        depth, i = depth + 1, i + 2
+                    elif sql.startswith("*/", i):
+                        depth, i = depth - 1, i + 2
+                    else:
+                        i += 1
+                buf.append(" ")
+                continue
         if dollar_tag is not None:
             if sql.startswith(dollar_tag, i):
                 buf.append(dollar_tag)
@@ -92,8 +110,7 @@ def inserts_by_table(sql: str) -> Dict[str, List[str]]:
     """The statements that are INSERTs, grouped by target table in file order."""
     tables: Dict[str, List[str]] = {}
     for statement in split_statements(sql):
-        start = _LEADING_COMMENTS.match(statement).end()
-        match = INSERT_TARGET.match(statement, start)
+        match = INSERT_TARGET.match(statement)
         if match:
             tables.setdefault(target_table(match), []).append(statement)
     return tables
