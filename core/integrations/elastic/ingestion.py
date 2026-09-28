@@ -66,7 +66,15 @@ class ElasticIngestion(SIEMIngestionService):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         limit: int = 100,
+        oldest_first: bool = False,
     ) -> List[Dict[str, Any]]:
+        """Fetch detection alerts in the window.
+
+        ``oldest_first`` is what federation asks for: a batch that fills
+        ``limit`` must be a contiguous oldest-first prefix of the window so the
+        cursor can stop at its newest alert. The default keeps the newest-first
+        order the daemon poller has always read.
+        """
         try:
             svc = self._get_elastic_service()
             if not svc:
@@ -99,7 +107,11 @@ class ElasticIngestion(SIEMIngestionService):
                 }
             }
 
-            result = await svc.fetch_detection_alerts(query=time_filter, size=limit)
+            result = await svc.fetch_detection_alerts(
+                query=time_filter,
+                size=limit,
+                sort_order="asc" if oldest_first else "desc",
+            )
             if result is None:
                 # The client returns None on any request failure.
                 raise RuntimeError("Elastic detection alert search failed")
