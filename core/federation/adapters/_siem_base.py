@@ -58,11 +58,9 @@ class SIEMIngestionAdapter:
             return self._service
         if not self.is_configured():
             return None
-        try:
-            self._service = self._service_factory()
-        except Exception as e:
-            logger.warning("%s service init failed: %s", self.name, e)
-            self._service = None
+        # A configured source whose service cannot be built is failing, not
+        # empty: let the error reach the runner so the cursor is kept.
+        self._service = self._service_factory()
         return self._service
 
     async def fetch(
@@ -81,11 +79,10 @@ class SIEMIngestionAdapter:
             # First run: small window so we don't backfill on enable.
             start_time = utcnow() - timedelta(minutes=1)
 
-        try:
-            alerts = await svc.fetch_alerts(start_time=start_time, limit=max_items)
-        except Exception as e:
-            logger.debug("%s fetch_alerts failed: %s", self.name, e)
-            alerts = []
+        # A raised fetch reaches the runner, which records the failure and keeps
+        # the cursor; swallowing it here would advance the cursor past alerts
+        # the source never returned.
+        alerts = await svc.fetch_alerts(start_time=start_time, limit=max_items)
 
         findings = []
         for alert in (alerts or [])[:max_items]:

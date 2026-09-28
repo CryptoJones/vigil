@@ -71,6 +71,11 @@ class ElasticIngestion(SIEMIngestionService):
             svc = self._get_elastic_service()
             if not svc:
                 return []
+            # Detection alerts come from Kibana; without it there is nothing to
+            # ingest, which is missing configuration rather than an outage.
+            if not svc.kibana_url:
+                logger.error("Elastic configuration incomplete: missing kibana_url")
+                return []
 
             if not start_time:
                 start_time = utcnow() - timedelta(hours=24)
@@ -95,15 +100,17 @@ class ElasticIngestion(SIEMIngestionService):
             }
 
             result = await svc.fetch_detection_alerts(query=time_filter, size=limit)
-            if not result:
-                return []
+            if result is None:
+                # The client returns None on any request failure.
+                raise RuntimeError("Elastic detection alert search failed")
 
             hits = result.get("hits", {}).get("hits", [])
             logger.info(f"Fetched {len(hits)} detection alerts from Elastic Security")
             return hits
         except Exception as e:
             logger.error(f"Error fetching Elastic alerts: {e}")
-            return []
+            # Raise, not []: federation must record the failure and keep its cursor.
+            raise
 
     def transform_alert_to_finding(
         self, alert: Dict[str, Any]

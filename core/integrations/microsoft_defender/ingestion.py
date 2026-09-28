@@ -48,7 +48,10 @@ class MicrosoftDefenderIngestion(SIEMIngestionService):
         Get OAuth2 access token for Microsoft Defender API.
 
         Returns:
-            Access token or None
+            Access token, or None when credentials are not configured.
+
+        Raises:
+            Exception: when the token exchange itself fails.
         """
         try:
             tenant_id = self.config.get("tenant_id")
@@ -83,7 +86,8 @@ class MicrosoftDefenderIngestion(SIEMIngestionService):
 
         except Exception as e:
             logger.error(f"Error getting Microsoft Defender access token: {e}")
-            return None
+            # A failed token exchange is an outage, not missing configuration.
+            raise
 
     async def fetch_alerts(
         self,
@@ -146,10 +150,11 @@ class MicrosoftDefenderIngestion(SIEMIngestionService):
 
         except (httpx.HTTPError, httpx.InvalidURL) as e:
             logger.error(f"Microsoft Defender API error: {e}")
-            return []
+            # Raise, not []: federation must record the failure and keep its cursor.
+            raise
         except Exception as e:
             logger.error(f"Error fetching Microsoft Defender alerts: {e}")
-            return []
+            raise
 
     def transform_alert_to_finding(
         self, alert: Dict[str, Any]
