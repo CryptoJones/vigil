@@ -28,7 +28,7 @@ on the vendor's descriptor; the map below derives itself from the descriptors,
 and only a Catalog Entry with no code behind it is listed literally in
 ``_CATALOG_ONLY_SECRET_FIELDS``. The default ``<INTEGRATION_ID>_<FIELD>``
 convention is built automatically; add an ``_ENV_VAR_OVERRIDES`` entry
-only when the consumer reads the secret under a non-canonical name
+only when the consumer reads the value under a non-canonical name
 (e.g. CrowdStrike's official MCP server reads ``FALCON_*``).
 """
 
@@ -141,6 +141,11 @@ _ENV_VAR_OVERRIDES: Mapping[str, Mapping[str, str]] = {
     # mcp-config.json's PagerDuty server reads ${PAGERDUTY_API_KEY},
     # not PAGERDUTY_API_TOKEN.
     "pagerduty": {"api_token": "PAGERDUTY_API_KEY"},
+    # env.example and every existing deployment spell the self-hosted REST
+    # endpoint SPLUNK_URL, not the canonical SPLUNK_SERVER_URL. The resolver's
+    # env fallback for server_url keeps that name so an env-only deployment with
+    # nothing saved in Settings still constructs the client.
+    "splunk": {"server_url": "SPLUNK_URL"},
 }
 
 

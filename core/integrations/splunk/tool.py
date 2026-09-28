@@ -32,24 +32,8 @@ try:
 except ImportError:
     pass
 
-# GH #84 PR-F follow-up: prefer the secrets layer over direct env reads so
-# SPLUNK_* credentials can be rotated without editing .env. If the import
-# fails (e.g. the server is running outside the repo), we fall back to
-# os.environ — the keyring / dotenv lookups just get skipped.
-try:
-    from core.secrets import get_secret as _get_secret
-except Exception:  # noqa: BLE001
-    _get_secret = None  # type: ignore
-
-
-def _read_credential(key: str, default: str | None = None) -> str | None:
-    """Read a SPLUNK_* credential via secrets_manager, falling back to env."""
-    if _get_secret is not None:
-        value = _get_secret(key)
-        if value is not None:
-            return value
-    return os.environ.get(key, default)
-
+from core.integrations._base.config import missing, resolve
+from core.integrations.splunk.descriptor import SPLUNK
 
 logger = logging.getLogger(__name__)
 SPL_TEMPLATES = {
@@ -65,23 +49,44 @@ def result(data):
     return [types.TextContent(type="text", text=json.dumps(data, indent=2))]
 
 
+# The one way this server reads its config: the descriptor resolver. server_url
+# and username are not secrets, so Settings writes them onto the integration row
+# and the secrets store never sees them -- a get_secret-only read returned None
+# forever and every hunt reported "Splunk not configured" (#1113). resolve()
+# still falls back to SPLUNK_URL / SPLUNK_USERNAME / SPLUNK_PASSWORD when nothing
+# is stored, so an env-only deployment keeps working.
 def get_splunk_service():
     try:
         from core.integrations.splunk.client import SplunkService
 
-        url = _read_credential("SPLUNK_URL")
-        if not url:
+        config = resolve(SPLUNK)
+        # All three, not just the URL: the REST login posts username and password,
+        # so a URL alone builds a client whose every search fails at auth, which
+        # reads as "search failed" rather than "not configured". The old
+        # ${SPLUNK_*} placeholders held the server dormant until all three were
+        # set; this keeps that line now that Settings can supply them.
+        absent = missing(config, "server_url", "username", "password")
+        if absent:
+            # DEBUG, not INFO: an unconfigured install reaches here on every
+            # call. Field names only, never what was found.
+            logger.debug("Splunk not configured: missing %s", ", ".join(absent))
             return None
+        # resolve() returns every declared field, present-but-None when unset,
+        # and the descriptor's bool coercion has already turned "false" into
+        # False. Unset has always meant no verification here (the old "false"
+        # default), so None stays False: not Elastic's None -> True.
         return SplunkService(
-            server_url=url,
-            username=_read_credential("SPLUNK_USERNAME"),
-            password=_read_credential("SPLUNK_PASSWORD"),
-            verify_ssl=(
-                _read_credential("SPLUNK_VERIFY_SSL", "false") or "false"
-            ).lower()
-            == "true",
+            server_url=config["server_url"],
+            username=config["username"],
+            password=config["password"],
+            verify_ssl=bool(config.get("verify_ssl")),
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # A DB, decrypt or descriptor failure must not read as "not configured":
+        # that silence is how #1113 went undiagnosed. The class name only: a
+        # secret-backend or decrypt error can carry the value it choked on in
+        # its message, and a traceback would carry the same text.
+        logger.warning("Splunk config could not be resolved (%s)", type(exc).__name__)
         return None
 
 
