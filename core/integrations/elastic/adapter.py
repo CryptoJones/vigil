@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from core.federation.adapters._base import parse_alert_time
 from core.federation.adapters._siem_base import SIEMIngestionAdapter
 from core.federation.contract import FederationAdapter, register_adapter
@@ -27,6 +29,11 @@ def _factory() -> FederationAdapter:
         service_factory=make_service,
         external_id_prefix="elastic",
         alert_time=_alert_time,
+        # Filebeat indexes an alert some seconds after its @timestamp, so each
+        # tick reads up to a minute ago and the cursor stops there. Kibana
+        # detection alerts have the same race in a milder form; they arrive a
+        # minute later for it.
+        settle_delay=timedelta(seconds=60),
     )
 
 

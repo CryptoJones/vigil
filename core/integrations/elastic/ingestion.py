@@ -10,7 +10,7 @@ Kibana in front of it and stores every alert as a document in
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
 from core.ingestion.siem_ingestion_service import SIEMIngestionService
@@ -25,18 +25,6 @@ logger = logging.getLogger(__name__)
 # starts calling an alert significant; below it is mostly noise.
 DEFAULT_MIN_RULE_LEVEL = 7
 MAX_RULE_LEVEL = 16
-
-# Filebeat indexes an alert some seconds after its ``@timestamp``. The
-# federation cursor is the wall clock at the end of a poll, so a window that
-# ran up to "now" would step past an alert still in flight. Each window ends
-# this long ago instead, and the next one starts where it ended.
-INDEXING_DELAY = timedelta(seconds=60)
-
-# How far a window steps past an instant that holds more alerts than fit in
-# one batch. Elastic and OpenSearch ``date`` fields resolve to the millisecond,
-# so a smaller step would round back to the same instant and re-read the same
-# page every poll.
-WINDOW_STEP = timedelta(milliseconds=1)
 
 
 def min_rule_level_from_config(config: Mapping[str, Any]) -> int:
@@ -97,23 +85,6 @@ def is_wazuh_alert(source: Mapping[str, Any]) -> bool:
     return isinstance(rule, dict) and rule.get("level") is not None
 
 
-def _alert_time(hit: Mapping[str, Any]) -> Optional[datetime]:
-    """A hit's ``@timestamp`` as naive UTC, or None when it cannot be read."""
-    raw = (hit.get("_source") or {}).get("@timestamp")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    text = raw.strip()
-    if text[-1] in "Zz":
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
-
-
 def _as_list(value: Any) -> List[Any]:
     if value is None:
         return []
@@ -134,9 +105,6 @@ class ElasticIngestion(SIEMIngestionService):
         self.config = resolve(ELASTIC)
         self.min_rule_level = min_rule_level_from_config(self.config)
         self._elastic_service: Optional[ElasticService] = None
-        # Where the last index-mode window ended, so consecutive polls are
-        # contiguous although the federation cursor is the wall clock.
-        self._window_end: Optional[datetime] = None
 
     def _get_elastic_service(self) -> Optional[ElasticService]:
         if self._elastic_service:
@@ -245,40 +213,20 @@ class ElasticIngestion(SIEMIngestionService):
     ) -> List[Dict[str, Any]]:
         """Alerts at or above the minimum rule level, read from the index pattern.
 
-        With no explicit end the window ends ``INDEXING_DELAY`` ago and the next
-        one starts where this one ended, so an alert Filebeat has not indexed
-        yet is read next time rather than skipped. A cursor older than the last
-        window end wins (an operator reset, or a full-batch cursor persisted by
-        the adapter), so nothing already passed is skipped either. The first
-        poll in a process re-reads one delay's worth, because the window before
-        a restart ended before the persisted cursor; the runner dedups the
-        re-read alerts on external_id.
-
-        Results are oldest first, so a batch that fills ``limit`` is the oldest
-        contiguous slice of the window, and the window then ends at that
-        batch's newest alert rather than at the query bound: see
-        ``_next_window_end``.
+        Results are oldest first with ``_doc`` breaking ties, so a batch that
+        fills ``limit`` is the oldest contiguous slice of the window. Where the
+        next window starts, including the indexing delay that keeps an alert
+        Filebeat has not indexed yet from being skipped, is the federation
+        adapter's job: it persists the cursor and passes ``end_time``.
         """
+        window: Dict[str, str] = {"gte": start_time.isoformat() + "Z"}
         if end_time is not None:
-            since, until = start_time, end_time
-        else:
-            until = utcnow() - INDEXING_DELAY
-            if self._window_end is None:
-                since = start_time - INDEXING_DELAY
-            else:
-                since = min(start_time, self._window_end)
+            window["lte"] = end_time.isoformat() + "Z"
 
         query: Dict[str, Any] = {
             "bool": {
                 "filter": [
-                    {
-                        "range": {
-                            "@timestamp": {
-                                "gte": since.isoformat() + "Z",
-                                "lte": until.isoformat() + "Z",
-                            }
-                        }
-                    },
+                    {"range": {"@timestamp": window}},
                     {"range": {"rule.level": {"gte": self.min_rule_level}}},
                 ]
             }
@@ -296,51 +244,8 @@ class ElasticIngestion(SIEMIngestionService):
             raise RuntimeError(f"Elastic index search failed: {svc.index_pattern}")
 
         hits = result.get("hits", {}).get("hits", [])
-        if end_time is None:
-            self._window_end = self._next_window_end(hits, limit, since, until)
         logger.info(f"Fetched {len(hits)} alerts from index {svc.index_pattern}")
         return hits
-
-    def _next_window_end(
-        self, hits: List[Dict[str, Any]], limit: int, since: datetime, until: datetime
-    ) -> datetime:
-        """Where the next window starts.
-
-        A short batch drained the window, so it ends where the query did. A
-        full batch may have left alerts behind, so it ends at the newest alert
-        returned; the next window re-reads that boundary alert (the range is
-        inclusive) and the runner dedups it. When the newest alert is not past
-        the window start, more than ``limit`` alerts share one instant: the
-        window steps ``WINDOW_STEP`` past it so the same page cannot repeat
-        forever, and the alerts at that instant beyond this batch are skipped.
-        """
-        if len(hits) < limit:
-            return until
-        newest = _alert_time(hits[-1])
-        if newest is None:
-            logger.warning(
-                "Elastic index search filled limit=%d but the newest alert has no "
-                "readable @timestamp; the window moves to its end and the rest of "
-                "it is skipped",
-                limit,
-            )
-            return until
-        if newest <= since:
-            logger.warning(
-                "Elastic index search filled limit=%d with alerts at %s, the window "
-                "start; stepping to %s. Alerts at that instant beyond this batch "
-                "are skipped; raise max_items if this repeats",
-                limit,
-                newest.isoformat(),
-                (since + WINDOW_STEP).isoformat(),
-            )
-            return since + WINDOW_STEP
-        logger.info(
-            "Elastic index search filled limit=%d; the next window starts at %s",
-            limit,
-            newest.isoformat(),
-        )
-        return newest
 
     def transform_alert_to_finding(
         self, alert: Dict[str, Any]

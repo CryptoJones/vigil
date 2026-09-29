@@ -8,7 +8,6 @@ Wazuh schema (``rule.level``, ``rule.description``, ``rule.mitre.id``,
 """
 
 import json
-import logging
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,11 +15,11 @@ import httpx
 import pytest
 import respx
 
+from core.federation.adapters._base import cursor_at, parse_cursor_since
 from core.federation.adapters._siem_base import SIEMIngestionAdapter
 from core.integrations.elastic import ingestion as elastic_ingestion
 from core.integrations.elastic.ingestion import (
     DEFAULT_MIN_RULE_LEVEL,
-    INDEXING_DELAY,
     ElasticIngestion,
     is_wazuh_alert,
     min_rule_level_from_config,
@@ -33,6 +32,8 @@ ES_URL = "https://indexer.test:9200"
 INDEX = "wazuh-alerts-4.x-*"
 SEARCH = f"{ES_URL}/{INDEX}/_search"
 NOW = datetime(2026, 9, 28, 12, 0, 0)
+# The settle delay the Elastic federation adapter is built with.
+SETTLE = timedelta(seconds=60)
 
 # Shape taken from a live wazuh-alerts-4.x document (Wazuh 4.14) after its
 # Filebeat pipeline: `timestamp` copied into `@timestamp`, no `host`.
@@ -192,206 +193,11 @@ async def test_fetch_without_kibana_queries_the_index_oldest_first(frozen_now):
         {"_doc": {"order": "asc"}},
     ]
     assert _range(body, "rule.level") == {"gte": DEFAULT_MIN_RULE_LEVEL}
-    window = _range(body, "@timestamp")
-    # First poll in the process: one delay's worth before the cursor, up to
-    # one delay ago.
-    assert window == {
-        "gte": (start - INDEXING_DELAY).isoformat() + "Z",
-        "lte": (NOW - INDEXING_DELAY).isoformat() + "Z",
-    }
+    # The service reads exactly the window it is given; with no end_time it
+    # has no upper bound. The indexing delay is the adapter's, not the
+    # service's (see the adapter tests below).
+    assert _range(body, "@timestamp") == {"gte": start.isoformat() + "Z"}
     await ingestion._get_elastic_service().close()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_consecutive_polls_are_contiguous_despite_a_wall_clock_cursor(
-    monkeypatch,
-):
-    """The federation cursor after a short batch is the wall clock at the end
-    of the poll, later than the window that poll read. The next window must
-    start where the last one ended, not at the cursor."""
-    route = respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200, json={"hits": {"total": {"value": 0}, "hits": []}}
-        )
-    )
-    ingestion = _ingestion()
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: NOW)
-    await ingestion.fetch_alerts(start_time=NOW - timedelta(minutes=5))
-    first_until = _range(_body(route), "@timestamp")["lte"]
-
-    # Cursor persisted by the runner: "now" at the end of the first poll.
-    cursor = NOW
-    later = NOW + timedelta(minutes=5)
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: later)
-    await ingestion.fetch_alerts(start_time=cursor)
-    window = _range(_body(route), "@timestamp")
-
-    assert window["gte"] == first_until
-    assert window["lte"] == (later - INDEXING_DELAY).isoformat() + "Z"
-    await ingestion._get_elastic_service().close()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_a_cursor_older_than_the_last_window_end_wins(monkeypatch):
-    """A full batch stops the cursor at its newest alert (or an operator
-    resets it). That is earlier than the last window end and must not be
-    skipped."""
-    route = respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200, json={"hits": {"total": {"value": 0}, "hits": []}}
-        )
-    )
-    ingestion = _ingestion()
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: NOW)
-    await ingestion.fetch_alerts(start_time=NOW - timedelta(minutes=5))
-
-    older_cursor = NOW - timedelta(minutes=3)
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: NOW + timedelta(minutes=5))
-    await ingestion.fetch_alerts(start_time=older_cursor)
-
-    assert _range(_body(route), "@timestamp")["gte"] == older_cursor.isoformat() + "Z"
-    await ingestion._get_elastic_service().close()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_failed_search_keeps_the_window_end(monkeypatch):
-    route = respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200, json={"hits": {"total": {"value": 0}, "hits": []}}
-        )
-    )
-    ingestion = _ingestion()
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: NOW)
-    await ingestion.fetch_alerts(start_time=NOW - timedelta(minutes=5))
-    kept = ingestion._window_end
-    assert kept == NOW - INDEXING_DELAY
-
-    route.mock(return_value=httpx.Response(503, text="unavailable"))
-    monkeypatch.setattr(elastic_ingestion, "utcnow", lambda: NOW + timedelta(minutes=5))
-    with pytest.raises(RuntimeError, match="index search failed"):
-        await ingestion.fetch_alerts(start_time=NOW)
-    assert ingestion._window_end == kept
-    await ingestion._get_elastic_service().close()
-
-
-def _hit(ident: str, stamp: str) -> dict:
-    return {
-        "_index": "wazuh-alerts-4.x-2026.09.28",
-        "_id": ident,
-        "_source": {"@timestamp": stamp, "rule": {"level": 7, "description": ident}},
-    }
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_a_full_batch_ends_the_window_at_its_newest_alert(monkeypatch):
-    """Five alerts, limit 2, wall-clock cursor. The fake indexer honours the
-    inclusive ``gte`` and ``size`` like a real one, so each full batch is
-    followed by a re-read of its boundary alert (the runner dedups it) and
-    nothing between the last returned alert and the query bound is lost."""
-    # Stamped 11:55..11:59: inside the first window [11:54, 11:59].
-    alerts = [_hit(f"a{i}", f"2026-09-28T11:5{5 + i}:00.000Z") for i in range(5)]
-
-    def indexer(request):
-        body = json.loads(request.content)
-        gte = _range(body, "@timestamp")["gte"]
-        # Compare to the second: the stamps are whole minutes, and a lexical
-        # compare of "...00.000Z" against "...00Z" would drop the boundary.
-        page = [h for h in alerts if h["_source"]["@timestamp"][:19] >= gte[:19]]
-        page = page[: body["size"]]
-        return httpx.Response(
-            200, json={"hits": {"total": {"value": len(page)}, "hits": page}}
-        )
-
-    route = respx.post(SEARCH).mock(side_effect=indexer)
-    ingestion = _ingestion()
-    seen, windows = [], []
-    for tick in range(6):
-        now = NOW + timedelta(minutes=5 * tick)
-        monkeypatch.setattr(elastic_ingestion, "utcnow", lambda now=now: now)
-        # The runner persists the wall clock after every short or full batch.
-        cursor = now - timedelta(minutes=5)
-        batch = await ingestion.fetch_alerts(start_time=cursor, limit=2)
-        seen += [h["_id"] for h in batch]
-        windows.append(_range(_body(route), "@timestamp")["gte"])
-        if len(batch) < 2:
-            break
-
-    # Full batches end the window at their newest alert; the next window
-    # starts there and re-reads that one alert before moving on.
-    assert windows == [
-        "2026-09-28T11:54:00Z",
-        "2026-09-28T11:56:00Z",
-        "2026-09-28T11:57:00Z",
-        "2026-09-28T11:58:00Z",
-        "2026-09-28T11:59:00Z",
-    ]
-    assert seen == ["a0", "a1", "a1", "a2", "a2", "a3", "a3", "a4", "a4"]
-    assert sorted(set(seen)) == ["a0", "a1", "a2", "a3", "a4"]
-    assert ingestion._window_end == NOW + timedelta(minutes=20) - INDEXING_DELAY
-    await ingestion._get_elastic_service().close()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_a_full_batch_at_one_instant_steps_one_millisecond(frozen_now, caplog):
-    """More alerts than fit at the very instant the window starts: the window
-    must move past it rather than re-read the same page forever."""
-    start = NOW - timedelta(minutes=5)
-    since = start - INDEXING_DELAY  # first poll in the process
-    stamp = since.isoformat(timespec="milliseconds") + "Z"
-    respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "hits": {
-                    "total": {"value": 9},
-                    "hits": [_hit("x", stamp), _hit("y", stamp)],
-                }
-            },
-        )
-    )
-    ingestion = _ingestion()
-    await ingestion.fetch_alerts(start_time=start, limit=2)
-    assert ingestion._window_end == since + timedelta(milliseconds=1)
-    assert "stepping to" in caplog.text
-    await ingestion._get_elastic_service().close()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_a_full_batch_without_readable_times_falls_back_to_the_bound(
-    frozen_now, caplog
-):
-    respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "hits": {"total": {"value": 9}, "hits": [{"_id": "n1", "_source": {}}]}
-            },
-        )
-    )
-    ingestion = _ingestion()
-    await ingestion.fetch_alerts(start_time=NOW - timedelta(minutes=5), limit=1)
-    assert ingestion._window_end == NOW - INDEXING_DELAY
-    assert "no readable @timestamp" in caplog.text
-    await ingestion._get_elastic_service().close()
-
-
-def test_alert_time_parses_wazuh_and_aware_forms():
-    from core.integrations.elastic.ingestion import _alert_time
-
-    assert _alert_time(_hit("a", "2026-09-28T11:17:18.394Z")) == datetime(
-        2026, 9, 28, 11, 17, 18, 394000
-    )
-    assert _alert_time(_hit("a", "2026-09-28T06:17:18.394-05:00")) == datetime(
-        2026, 9, 28, 11, 17, 18, 394000
-    )
-    assert _alert_time(_hit("a", "garbage")) is None
-    assert _alert_time({"_id": "a", "_source": {}}) is None
 
 
 @respx.mock
@@ -409,27 +215,192 @@ async def test_explicit_end_time_is_used_as_given(frozen_now):
         "gte": start.isoformat() + "Z",
         "lte": end.isoformat() + "Z",
     }
-    # A caller-managed window does not move the poller's own window end.
-    assert ingestion._window_end is None
     await ingestion._get_elastic_service().close()
+
+
+@pytest.mark.asyncio
+async def test_the_service_keeps_no_window_state():
+    """Two fetches with the same arguments send the same query: where the
+    next window starts is the persisted federation cursor, nothing else."""
+    ingestion = _ingestion()
+    svc = ingestion._get_elastic_service()
+    svc.search = AsyncMock(return_value={"hits": {"hits": [_hit("a", "x")]}})
+    start, end = NOW - timedelta(minutes=5), NOW - timedelta(minutes=1)
+    await ingestion.fetch_alerts(start_time=start, end_time=end, limit=1)
+    await ingestion.fetch_alerts(start_time=start, end_time=end, limit=1)
+    first, second = svc.search.await_args_list
+    assert first.kwargs == second.kwargs
+
+
+# -- through the Elastic federation adapter --------------------------------
+
+
+def _hit(ident: str, stamp: str) -> dict:
+    return {
+        "_index": "wazuh-alerts-4.x-2026.09.28",
+        "_id": ident,
+        "_source": {"@timestamp": stamp, "rule": {"level": 7, "description": ident}},
+    }
+
+
+def _stamp(when: datetime) -> str:
+    return when.isoformat(timespec="milliseconds") + "Z"
+
+
+class _Indexer:
+    """A fake indexer that honours ``gte``, ``lte``, ``size`` and the ascending
+    sort like a real one, and only returns a document once it is indexed:
+    ``indexed_at`` lets a test stamp an alert before the moment it becomes
+    searchable, as Filebeat does."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.docs: list = []  # (hit, indexed_at)
+        self.windows: list = []
+
+    def add(self, ident: str, when: datetime, indexed_at: datetime = None) -> None:
+        self.docs.append((_hit(ident, _stamp(when)), indexed_at or when))
+
+    def __call__(self, request):
+        body = json.loads(request.content)
+        window = _range(body, "@timestamp")
+        self.windows.append(window)
+        gte = datetime.fromisoformat(window["gte"][:-1])
+        lte = datetime.fromisoformat(window["lte"][:-1]) if "lte" in window else None
+        now = self.clock()
+        found = []
+        for hit, indexed_at in self.docs:
+            when = datetime.fromisoformat(hit["_source"]["@timestamp"][:-1])
+            if indexed_at > now or when < gte or (lte is not None and when > lte):
+                continue
+            found.append((when, hit))
+        found.sort(key=lambda pair: pair[0])
+        hits = [hit for _, hit in found[: body["size"]]]
+        return httpx.Response(200, json={"hits": {"hits": hits}})
+
+
+class _Clock:
+    def __init__(self, now: datetime):
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def _elastic_adapter(monkeypatch, clock: _Clock):
+    """The real Elastic adapter factory, over an index-mode ingestion service.
+
+    A new adapter per call, so a test can show that nothing but the persisted
+    cursor carries over between ticks, as across a daemon restart."""
+    from core.integrations.elastic import adapter as elastic_adapter
+
+    monkeypatch.setattr("core.federation.adapters._siem_base.utcnow", clock)
+    monkeypatch.setattr(elastic_adapter, "ElasticIngestion", lambda: _ingestion())
+    adapter = elastic_adapter._factory()
+    monkeypatch.setattr(adapter, "is_configured", lambda: True)
+    return adapter
+
+
+async def _tick(monkeypatch, clock, cursor, max_items=10):
+    adapter = _elastic_adapter(monkeypatch, clock)
+    result = await adapter.fetch(since=None, cursor=cursor, max_items=max_items)
+    await adapter._get_service()._get_elastic_service().close()
+    return result
 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_a_full_batch_is_logged(frozen_now, caplog):
-    caplog.set_level(logging.INFO, logger="core.integrations.elastic.ingestion")
-    stamp = (NOW - timedelta(minutes=3)).isoformat(timespec="milliseconds") + "Z"
-    respx.post(SEARCH).mock(
-        return_value=httpx.Response(
-            200, json={"hits": {"total": {"value": 250}, "hits": [_hit("f", stamp)]}}
-        )
+async def test_a_short_batch_persists_now_minus_the_delay(monkeypatch):
+    clock = _Clock(NOW)
+    indexer = _Indexer(clock)
+    indexer.add("a", NOW - timedelta(minutes=3))
+    respx.post(SEARCH).mock(side_effect=indexer)
+    start = NOW - timedelta(minutes=5)
+
+    result = await _tick(monkeypatch, clock, cursor_at(start))
+
+    assert [f["external_id"] for f in result.findings] == ["a"]
+    assert indexer.windows[0] == {
+        "gte": start.isoformat() + "Z",
+        "lte": (NOW - SETTLE).isoformat() + "Z",
+    }
+    assert parse_cursor_since(result.cursor) == NOW - SETTLE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_an_alert_indexed_after_its_timestamp_is_read_next_tick(monkeypatch):
+    """Stamped 10 s before the poll, searchable only 5 s after it. Without the
+    delay the cursor would move to the poll time and this alert would never be
+    read. A fresh adapter per tick: the state is only the persisted cursor."""
+    clock = _Clock(NOW)
+    indexer = _Indexer(clock)
+    indexer.add(
+        "late", NOW - timedelta(seconds=10), indexed_at=NOW + timedelta(seconds=5)
     )
-    ingestion = _ingestion()
-    hits = await ingestion.fetch_alerts(start_time=NOW - timedelta(minutes=5), limit=1)
-    assert [h["_id"] for h in hits] == ["f"]
-    assert "filled limit=1" in caplog.text
-    assert ingestion._window_end == NOW - timedelta(minutes=3)
-    await ingestion._get_elastic_service().close()
+    respx.post(SEARCH).mock(side_effect=indexer)
+
+    first = await _tick(monkeypatch, clock, cursor_at(NOW - timedelta(minutes=5)))
+    assert first.findings == []
+
+    clock.now = NOW + timedelta(minutes=5)
+    second = await _tick(monkeypatch, clock, first.cursor)
+
+    assert [f["external_id"] for f in second.findings] == ["late"]
+    assert indexer.windows[1]["gte"] == (NOW - SETTLE).isoformat() + "Z"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_a_full_batch_drains_oldest_first_without_losing_alerts(monkeypatch):
+    """Seven alerts, max_items 3. Each full batch stops the cursor at its
+    newest alert; the boundary alert is re-read and left to the runner's
+    dedup; the last short batch moves the cursor to now minus the delay."""
+    clock = _Clock(NOW)
+    indexer = _Indexer(clock)
+    for i in range(7):
+        indexer.add(f"a{i}", NOW - timedelta(minutes=10 - i))
+    respx.post(SEARCH).mock(side_effect=indexer)
+
+    cursor = cursor_at(NOW - timedelta(minutes=11))
+    seen, cursors = [], []
+    for _ in range(6):
+        result = await _tick(monkeypatch, clock, cursor, max_items=3)
+        seen.extend(f["external_id"] for f in result.findings)
+        cursor = result.cursor
+        cursors.append(parse_cursor_since(cursor))
+        if len(result.findings) < 3:
+            break
+
+    assert sorted(set(seen)) == [f"a{i}" for i in range(7)]
+    # Oldest first, and each batch starts at the previous batch's newest alert.
+    # The third batch is full too, so a fourth tick re-reads a6 and, short,
+    # moves the cursor to now minus the delay.
+    assert seen == ["a0", "a1", "a2", "a2", "a3", "a4", "a4", "a5", "a6", "a6"]
+    assert cursors == [
+        NOW - timedelta(minutes=8),
+        NOW - timedelta(minutes=6),
+        NOW - timedelta(minutes=4),
+        NOW - SETTLE,
+    ]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_a_cursor_inside_the_settle_window_reads_nothing(monkeypatch):
+    """A cursor stored as the wall clock by an earlier release is newer than
+    now minus the delay: the tick has nothing settled to read, and the cursor
+    must not move backwards or forwards."""
+    clock = _Clock(NOW)
+    indexer = _Indexer(clock)
+    route = respx.post(SEARCH).mock(side_effect=indexer)
+    stored = NOW - timedelta(seconds=20)
+
+    result = await _tick(monkeypatch, clock, cursor_at(stored))
+
+    assert result.findings == []
+    assert not route.called
+    assert parse_cursor_since(result.cursor) == stored
 
 
 @pytest.mark.asyncio

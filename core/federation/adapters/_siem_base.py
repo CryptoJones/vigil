@@ -47,6 +47,7 @@ class SIEMIngestionAdapter:
         service_factory: Callable[[], Any],
         external_id_prefix: str,
         alert_time: Optional[Callable[[Dict[str, Any]], Optional[datetime]]] = None,
+        settle_delay: Optional[timedelta] = None,
     ) -> None:
         self.name = name
         self._integration_id = integration_id
@@ -59,6 +60,13 @@ class SIEMIngestionAdapter:
         # cursor goes to now, as it did before, and a full batch skips the rest
         # of its window.
         self._alert_time = alert_time
+        # How long a source may take to make an alert searchable after the time
+        # stamped on it (Filebeat indexing into Elastic, for one). With it, each
+        # tick reads only up to now minus the delay and persists that instant,
+        # so an alert stamped just before a poll but indexed just after it is
+        # read by the next tick rather than skipped. The state is only the
+        # persisted cursor, so it survives a restart.
+        self._settle_delay = settle_delay
 
     def is_configured(self) -> bool:
         return is_integration_enabled(self._integration_id)
@@ -102,14 +110,24 @@ class SIEMIngestionAdapter:
         # the window for good.
         # Taken before the fetch: the cursor never moves past the "now" the
         # pre-change code would have stored, even if a source returns an alert
-        # stamped ahead of our clock.
+        # stamped ahead of our clock. With a settle delay the tick reads, and
+        # the cursor stops, at now minus the delay.
         now = utcnow()
-        alerts = list(
-            await svc.fetch_alerts(
-                start_time=start_time, limit=max_items, oldest_first=True
-            )
-            or []
-        )
+        window_end = now - self._settle_delay if self._settle_delay else None
+        if window_end is not None and window_end <= start_time:
+            # The cursor is already inside the settle window (it was stored as
+            # now by an earlier release, or the delay was raised): nothing is
+            # settled yet, so read nothing and keep the cursor where it is.
+            return FetchResult(findings=[], cursor=cursor_at(start_time))
+
+        fetch_kwargs: Dict[str, Any] = {
+            "start_time": start_time,
+            "limit": max_items,
+            "oldest_first": True,
+        }
+        if window_end is not None:
+            fetch_kwargs["end_time"] = window_end
+        alerts = list(await svc.fetch_alerts(**fetch_kwargs) or [])
         truncated = len(alerts) >= max_items
         alerts = alerts[:max_items]
 
@@ -138,14 +156,24 @@ class SIEMIngestionAdapter:
         return FetchResult(
             findings=findings,
             cursor=self._next_cursor(
-                alerts, truncated=truncated, start=start_time, now=now
+                alerts, truncated=truncated, start=start_time, now=now, end=window_end
             ),
         )
 
     def _next_cursor(
-        self, alerts: list, *, truncated: bool, start: datetime, now: datetime
+        self,
+        alerts: list,
+        *,
+        truncated: bool,
+        start: datetime,
+        now: datetime,
+        end: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Where the next tick starts.
+
+        ``end`` is the upper bound of the window read when the adapter has a
+        settle delay; it stands in for now below, so the cursor never passes an
+        instant the tick did not read.
 
         A short batch drained its window, so the cursor moves to now. A full
         batch may have left alerts behind, so the cursor stops at the newest
@@ -157,8 +185,10 @@ class SIEMIngestionAdapter:
         not carry the cursor into the future, where later alerts with earlier
         times would be skipped.
         """
+        drained = cursor_at(end) if end is not None else fresh_cursor()
+        ceiling = end if end is not None else now
         if not truncated or self._alert_time is None:
-            return fresh_cursor()
+            return drained
 
         newest: Optional[datetime] = None
         for alert in alerts:
@@ -180,17 +210,22 @@ class SIEMIngestionAdapter:
                 self.name,
                 len(alerts),
             )
-            return fresh_cursor()
+            return drained
 
-        if newest > now:
+        if newest > ceiling:
             logger.warning(
-                "Federation %s: newest alert time %s is ahead of this host's clock "
-                "%s; capping the cursor at the clock",
+                "Federation %s: newest alert time %s is %s %s; capping the "
+                "cursor there",
                 self.name,
                 newest.isoformat(),
-                now.isoformat(),
+                (
+                    "ahead of this host's clock"
+                    if end is None
+                    else "past the settled end of the window read"
+                ),
+                ceiling.isoformat(),
             )
-            newest = now
+            newest = ceiling
 
         if newest <= start:
             # Every alert in a full batch sits at or before the tick's start.

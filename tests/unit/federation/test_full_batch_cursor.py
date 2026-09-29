@@ -40,8 +40,9 @@ class _WindowService:
     ``oldest_first`` exactly as the four cloud services do after this change.
     """
 
-    def __init__(self, alerts: List[Dict[str, Any]]):
+    def __init__(self, alerts: List[Dict[str, Any]], *, honour_end: bool = True):
         self.alerts = alerts
+        self.honour_end = honour_end
         self.calls: List[Dict[str, Any]] = []
 
     async def fetch_alerts(
@@ -52,9 +53,16 @@ class _WindowService:
         oldest_first: bool = False,
     ) -> List[Dict[str, Any]]:
         self.calls.append(
-            {"start_time": start_time, "limit": limit, "oldest_first": oldest_first}
+            {
+                "start_time": start_time,
+                "end_time": end_time,
+                "limit": limit,
+                "oldest_first": oldest_first,
+            }
         )
         window = [a for a in self.alerts if start_time is None or a["t"] >= start_time]
+        if end_time is not None and self.honour_end:
+            window = [a for a in window if a["t"] <= end_time]
         window.sort(key=lambda a: a["t"], reverse=not oldest_first)
         return window[:limit]
 
@@ -68,7 +76,11 @@ class _WindowService:
 
 
 def _adapter(
-    service: _WindowService, monkeypatch, *, with_time_reader: bool = True
+    service: _WindowService,
+    monkeypatch,
+    *,
+    with_time_reader: bool = True,
+    settle_delay: Optional[timedelta] = None,
 ) -> SIEMIngestionAdapter:
     adapter = SIEMIngestionAdapter(
         name="w",
@@ -77,6 +89,7 @@ def _adapter(
         service_factory=lambda: service,
         external_id_prefix="w",
         alert_time=(lambda a: a["t"]) if with_time_reader else None,
+        settle_delay=settle_delay,
     )
     monkeypatch.setattr(adapter, "is_configured", lambda: True)
     return adapter
@@ -221,6 +234,92 @@ async def test_a_reader_that_raises_on_one_record_does_not_fail_the_poll(monkeyp
     adapter._alert_time = flaky
     result = await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=3)
     assert parse_cursor_since(result.cursor) == T0 + timedelta(minutes=3)
+
+
+# ---------------------------------------------------------------------------
+# Settle delay
+# ---------------------------------------------------------------------------
+
+SETTLE = timedelta(seconds=60)
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    now = T0 + timedelta(minutes=30)
+    monkeypatch.setattr("core.federation.adapters._siem_base.utcnow", lambda: now)
+    return now
+
+
+@pytest.mark.asyncio
+async def test_without_a_settle_delay_no_end_time_is_passed(monkeypatch):
+    """Sources other than Elastic are built without a delay and keep reading
+    up to now, with no end_time their fetch_alerts might not accept."""
+    svc = _WindowService([_alert(1, T0 + timedelta(minutes=1))])
+    adapter = _adapter(svc, monkeypatch)
+
+    await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=3)
+
+    assert svc.calls[0]["end_time"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_settle_delay_bounds_the_read_and_the_short_batch_cursor(
+    monkeypatch, frozen_clock
+):
+    svc = _WindowService([_alert(1, T0 + timedelta(minutes=1))])
+    adapter = _adapter(svc, monkeypatch, settle_delay=SETTLE)
+
+    result = await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=3)
+
+    assert svc.calls[0]["end_time"] == frozen_clock - SETTLE
+    assert parse_cursor_since(result.cursor) == frozen_clock - SETTLE
+
+
+@pytest.mark.asyncio
+async def test_a_full_batch_is_capped_at_the_window_end_not_now(
+    monkeypatch, frozen_clock
+):
+    """A source that returns alerts past the end it was given must not carry
+    the cursor past the window read: those alerts may not have settled."""
+    end = frozen_clock - SETTLE
+    svc = _WindowService(
+        [
+            _alert(1, T0 + timedelta(minutes=1)),
+            _alert(2, end + timedelta(seconds=30)),
+        ],
+        honour_end=False,
+    )
+    adapter = _adapter(svc, monkeypatch, settle_delay=SETTLE)
+
+    result = await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=2)
+
+    assert parse_cursor_since(result.cursor) == end
+
+
+@pytest.mark.asyncio
+async def test_a_full_batch_without_times_falls_back_to_the_window_end(
+    monkeypatch, frozen_clock
+):
+    svc = _WindowService([_alert(i, T0 + timedelta(minutes=i)) for i in range(1, 4)])
+    adapter = _adapter(svc, monkeypatch, with_time_reader=False, settle_delay=SETTLE)
+
+    result = await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=2)
+
+    assert parse_cursor_since(result.cursor) == frozen_clock - SETTLE
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_inside_the_settle_window_is_kept_and_nothing_read(
+    monkeypatch, frozen_clock
+):
+    svc = _WindowService([])
+    adapter = _adapter(svc, monkeypatch, settle_delay=SETTLE)
+    stored = frozen_clock - timedelta(seconds=10)
+
+    result = await adapter.fetch(since=None, cursor=cursor_at(stored), max_items=3)
+
+    assert svc.calls == []
+    assert parse_cursor_since(result.cursor) == stored
 
 
 # ---------------------------------------------------------------------------
