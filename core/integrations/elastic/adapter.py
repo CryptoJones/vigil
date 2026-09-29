@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from core.federation.adapters._base import parse_alert_time
 from core.federation.adapters._siem_base import SIEMIngestionAdapter
 from core.federation.contract import FederationAdapter, register_adapter
 from core.integrations.elastic.ingestion import ElasticIngestion
+
+
+def _alert_time(alert):
+    """Creation time of a raw Kibana detection hit, before transform."""
+    return parse_alert_time((alert.get("_source") or {}).get("@timestamp"))
 
 
 def _factory() -> FederationAdapter:
@@ -20,6 +26,7 @@ def _factory() -> FederationAdapter:
         default_interval=300,  # SIEM cadence
         service_factory=make_service,
         external_id_prefix="elastic",
+        alert_time=_alert_time,
     )
 
 
