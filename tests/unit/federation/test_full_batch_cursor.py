@@ -146,6 +146,33 @@ async def test_full_batch_not_past_the_tick_start_steps_the_cursor_forward(
 
 
 @pytest.mark.asyncio
+async def test_a_future_stamped_alert_does_not_move_the_cursor_past_now(
+    monkeypatch, caplog
+):
+    """Clock skew: only Elastic's query has an upper bound of its own, so a full
+    batch can hold an alert stamped ahead of this host's clock. The cursor must
+    stop at the clock (taken before the fetch), as the pre-change code always
+    did, or later alerts with earlier times would be skipped."""
+    now = T0 + timedelta(minutes=5)
+    svc = _WindowService(
+        [
+            _alert(1, T0 + timedelta(minutes=1)),
+            _alert(2, T0 + timedelta(minutes=2)),
+            _alert(3, T0 + timedelta(hours=1)),
+        ]
+    )
+    adapter = _adapter(svc, monkeypatch)
+    monkeypatch.setattr("core.federation.adapters._siem_base.utcnow", lambda: now)
+
+    with caplog.at_level("WARNING"):
+        result = await adapter.fetch(since=None, cursor=cursor_at(T0), max_items=3)
+
+    assert len(result.findings) == 3
+    assert parse_cursor_since(result.cursor) == now
+    assert "ahead of this host's clock" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_an_aware_time_from_a_reader_is_compared_as_naive_utc(monkeypatch):
     svc = _WindowService([_alert(i, T0 + timedelta(minutes=i)) for i in range(1, 6)])
     adapter = _adapter(svc, monkeypatch)
@@ -168,9 +195,7 @@ async def test_full_batch_without_a_time_reader_falls_back_to_now(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_full_batch_with_unreadable_times_falls_back_to_now(
-    monkeypatch, caplog
-):
+async def test_full_batch_with_unreadable_times_falls_back_to_now(monkeypatch, caplog):
     svc = _WindowService([_alert(i, T0 + timedelta(minutes=i)) for i in range(1, 6)])
     adapter = _adapter(svc, monkeypatch)
     adapter._alert_time = lambda a: None

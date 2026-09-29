@@ -100,6 +100,10 @@ class SIEMIngestionAdapter:
         # fit must be the newest ones so the next tick, starting from the newest
         # returned time, picks them up. Newest-first would drop the oldest of
         # the window for good.
+        # Taken before the fetch: the cursor never moves past the "now" the
+        # pre-change code would have stored, even if a source returns an alert
+        # stamped ahead of our clock.
+        now = utcnow()
         alerts = list(
             await svc.fetch_alerts(
                 start_time=start_time, limit=max_items, oldest_first=True
@@ -133,11 +137,13 @@ class SIEMIngestionAdapter:
 
         return FetchResult(
             findings=findings,
-            cursor=self._next_cursor(alerts, truncated=truncated, start=start_time),
+            cursor=self._next_cursor(
+                alerts, truncated=truncated, start=start_time, now=now
+            ),
         )
 
     def _next_cursor(
-        self, alerts: list, *, truncated: bool, start: datetime
+        self, alerts: list, *, truncated: bool, start: datetime, now: datetime
     ) -> Dict[str, Any]:
         """Where the next tick starts.
 
@@ -145,7 +151,11 @@ class SIEMIngestionAdapter:
         batch may have left alerts behind, so the cursor stops at the newest
         alert actually returned; the next tick re-reads that boundary alert
         (the start filters are inclusive) and the runner's dedup and the
-        ``(data_source, external_id)`` unique index absorb it.
+        ``(data_source, external_id)`` unique index absorb it. The cursor is
+        capped at ``now`` (taken before the fetch): only Elastic's query has an
+        upper bound of its own, so an alert stamped ahead of our clock must
+        not carry the cursor into the future, where later alerts with earlier
+        times would be skipped.
         """
         if not truncated or self._alert_time is None:
             return fresh_cursor()
@@ -171,6 +181,16 @@ class SIEMIngestionAdapter:
                 len(alerts),
             )
             return fresh_cursor()
+
+        if newest > now:
+            logger.warning(
+                "Federation %s: newest alert time %s is ahead of this host's clock "
+                "%s; capping the cursor at the clock",
+                self.name,
+                newest.isoformat(),
+                now.isoformat(),
+            )
+            newest = now
 
         if newest <= start:
             # Every alert in a full batch sits at or before the tick's start.
