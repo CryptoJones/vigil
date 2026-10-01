@@ -2687,6 +2687,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/config/force-manual-approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Force Manual Approval
+         * @description Read ``approval.force_manual_approval`` without inserting a default row.
+         *
+         *     A failed read is an error, not Act: reporting the default would show
+         *     approvals as off while the stored flag may be forcing them on.
+         */
+        get: operations["get_api_config_force-manual-approval"];
+        put?: never;
+        /**
+         * Set Force Manual Approval
+         * @description Persist Assist or Act. Act is refused while the environment wins, so it
+         *     is not stored for later. Assist may still be stored.
+         */
+        post: operations["post_api_config_force-manual-approval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/config/general": {
         parameters: {
             query?: never;
@@ -2876,6 +2904,9 @@ export interface paths {
         /**
          * Get Orchestrator Config
          * @description Get orchestrator configuration.
+         *
+         *     ``profiles`` is extra on this body so the Settings cards can render it.
+         *     It is not read back from storage.
          */
         get: operations["get_api_config_orchestrator"];
         put?: never;
@@ -2884,6 +2915,9 @@ export interface paths {
          * @description Set orchestrator configuration. Persists settings AND syncs the
          *     runtime enabled flag used by GET /api/orchestrator/status (which
          *     NavigationRail uses to show/hide the Auto Ops tab).
+         *
+         *     A ``profiles`` field on the body is ignored. The stored object stays the
+         *     flat keys; no profile name is written.
          */
         post: operations["post_api_config_orchestrator"];
         delete?: never;
@@ -9687,6 +9721,24 @@ export interface components {
             total: number;
         };
         /**
+         * ForceManualApprovalConfig
+         * @description ``approval.force_manual_approval``. Assist is true, Act is false.
+         */
+        ForceManualApprovalConfig: {
+            /** Enabled */
+            enabled: boolean;
+        };
+        /**
+         * ForceManualApprovalResponse
+         * @description The stored flag, plus whether daemon env overrides Act.
+         */
+        ForceManualApprovalResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /** Environment Wins */
+            environment_wins: boolean;
+        };
+        /**
          * ForkAgentRequest
          * @description Optional payload when forking. `new_name` lets the UI set the copy's
          *     name up front instead of taking the default "<source> (copy)".
@@ -9960,6 +10012,45 @@ export interface components {
              * @default incident-response
              */
             workflow_id: string;
+        };
+        /**
+         * InvestigationProfile
+         * @description One Settings card. The name is not stored on the saved config.
+         */
+        InvestigationProfile: {
+            /** Label */
+            label: string;
+            /**
+             * Recommended
+             * @default false
+             */
+            recommended: boolean;
+            values: components["schemas"]["InvestigationProfileValues"];
+        };
+        /**
+         * InvestigationProfileValues
+         * @description The five limits a profile sets in one click.
+         */
+        InvestigationProfileValues: {
+            /** Max Concurrent Agents */
+            max_concurrent_agents: number;
+            /** Max Cost Per Investigation */
+            max_cost_per_investigation: number;
+            /** Max Iterations Per Agent */
+            max_iterations_per_agent: number;
+            /** Max Runtime Per Investigation */
+            max_runtime_per_investigation: number;
+            /** Max Total Hourly Cost */
+            max_total_hourly_cost: number;
+        };
+        /**
+         * InvestigationProfiles
+         * @description Keys the Auto Investigate section renders. ``aggressive`` is labelled Broad.
+         */
+        InvestigationProfiles: {
+            aggressive: components["schemas"]["InvestigationProfile"];
+            balanced: components["schemas"]["InvestigationProfile"];
+            conservative: components["schemas"]["InvestigationProfile"];
         };
         /** InvokeRequest */
         InvokeRequest: {
@@ -10287,6 +10378,66 @@ export interface components {
             trend_data?: {
                 [key: string]: unknown;
             }[];
+        };
+        /**
+         * OrchestratorConfigResponse
+         * @description Flat saved settings plus the profiles the Settings cards render.
+         *
+         *     ``profiles`` is not part of the stored object. POST takes
+         *     ``OrchestratorSettingsConfig`` and ignores the field.
+         */
+        OrchestratorConfigResponse: {
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Loop Interval
+             * @default 60
+             */
+            loop_interval: number;
+            /**
+             * Max Concurrent Agents
+             * @default 3
+             */
+            max_concurrent_agents: number;
+            /**
+             * Max Cost Per Investigation
+             * @default 5
+             */
+            max_cost_per_investigation: number;
+            /**
+             * Max Iterations Per Agent
+             * @default 50
+             */
+            max_iterations_per_agent: number;
+            /**
+             * Max Runtime Per Investigation
+             * @default 3600
+             */
+            max_runtime_per_investigation: number;
+            /**
+             * Max Total Hourly Cost
+             * @default 20
+             */
+            max_total_hourly_cost: number;
+            profiles: components["schemas"]["InvestigationProfiles"];
+            /**
+             * Stale Threshold
+             * @default 300
+             */
+            stale_threshold: number;
+            /**
+             * Workdir Base
+             * @default data/investigations
+             */
+            workdir_base: string;
         };
         /**
          * OrchestratorSettingsConfig
@@ -16437,6 +16588,72 @@ export interface operations {
             };
         };
     };
+    "get_api_config_force-manual-approval": {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForceManualApprovalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "post_api_config_force-manual-approval": {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForceManualApprovalConfig"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForceManualApprovalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_api_config_general: {
         parameters: {
             query?: never;
@@ -16747,7 +16964,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OrchestratorConfigResponse"];
                 };
             };
             /** @description Validation Error */
