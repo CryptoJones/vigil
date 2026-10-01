@@ -1850,6 +1850,10 @@ export interface paths {
          * Get Case
          * @description Get a specific case by ID.
          *
+         *     ``combined_state`` is the one function the header pill reads. Investigations
+         *     are newest first; the audit run is ``run_id_for`` of the latest, never the
+         *     shadow adjudication.
+         *
          *     Args:
          *         case_id: The case ID
          *
@@ -2234,6 +2238,31 @@ export interface paths {
          *     closed with a note and linked via a 'merged_into' relationship.
          */
         post: operations["post_api_cases_case_id_merge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cases/{case_id}/record": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Case Record
+         * @description The case record: the latest run's ledger, then this case's audit rows.
+         *
+         *     Newest first. The agent returns the ledger with snapshots off. Audit rows
+         *     are ``entity_type == case`` and ``entity_id`` this case — the table has no
+         *     ``case_id`` column. The run is ``run_id_for`` of the latest investigation,
+         *     not the shadow adjudication.
+         */
+        get: operations["get_api_cases_case_id_record"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -6964,6 +6993,10 @@ export interface paths {
          * Get Case
          * @description Get a specific case by ID.
          *
+         *     ``combined_state`` is the one function the header pill reads. Investigations
+         *     are newest first; the audit run is ``run_id_for`` of the latest, never the
+         *     shadow adjudication.
+         *
          *     Args:
          *         case_id: The case ID
          *
@@ -8396,6 +8429,23 @@ export interface components {
             root_cause?: string | null;
         };
         /**
+         * CaseClosureView
+         * @description What the closed summary shows. ``verdict`` is the stated reason.
+         */
+        CaseClosureView: {
+            /** Closed By */
+            closed_by: string;
+            /** Closed By Kind */
+            closed_by_kind: string;
+            /** Closure Category */
+            closure_category: string;
+            /**
+             * Verdict
+             * @default
+             */
+            verdict: string;
+        };
+        /**
          * CaseCommentSchema
          * @description CaseComment.
          */
@@ -8455,7 +8505,7 @@ export interface components {
         };
         /**
          * CaseDetailResponse
-         * @description ``GET /cases/{id}`` — the case record plus combined state.
+         * @description ``GET /cases/{id}`` — the case, its combined state, and the runs on it.
          */
         CaseDetailResponse: {
             /**
@@ -8467,6 +8517,7 @@ export interface components {
             assignee?: string | null;
             /** Case Id */
             case_id?: string | null;
+            closure?: components["schemas"]["CaseClosureView"] | null;
             /** Combined State */
             combined_state: string;
             /** Created At */
@@ -8475,6 +8526,11 @@ export interface components {
             description?: string | null;
             /** Finding Ids */
             finding_ids?: string[];
+            /**
+             * Investigations
+             * @default []
+             */
+            investigations: components["schemas"]["CaseInvestigationRef"][];
             /**
              * Mitre Techniques
              * @default []
@@ -8660,6 +8716,47 @@ export interface components {
             /** Value */
             value?: string | null;
         };
+        /**
+         * CaseInvestigationRef
+         * @description One investigation on the case page. Newest first on the detail read.
+         */
+        CaseInvestigationRef: {
+            /**
+             * Budget Health
+             * @default healthy
+             */
+            budget_health: string;
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd: number;
+            /** Created At */
+            created_at?: string | null;
+            /** Investigation Id */
+            investigation_id: string;
+            /**
+             * Iteration Count
+             * @default 0
+             */
+            iteration_count: number;
+            /**
+             * Live
+             * @default false
+             */
+            live: boolean;
+            /**
+             * Max Cost Usd
+             * @default 0
+             */
+            max_cost_usd: number;
+            /** Run Id */
+            run_id: string;
+            /** Status */
+            status: string;
+            /** Workflow Id */
+            workflow_id: string;
+        };
         /** CaseListResponse */
         CaseListResponse: {
             /** Cases */
@@ -8781,6 +8878,36 @@ export interface components {
             closed_today: number;
             /** Sla At Risk */
             sla_at_risk: number;
+        };
+        /**
+         * CaseRecordResponse
+         * @description The merged record. ``run_id`` is absent when the case has no investigation.
+         */
+        CaseRecordResponse: {
+            /** Investigation Id */
+            investigation_id?: string | null;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["CaseRecordRow"][];
+            /** Run Id */
+            run_id?: string | null;
+        };
+        /** CaseRecordRow */
+        CaseRecordRow: {
+            /** At */
+            at: string;
+            /** Chained */
+            chained: boolean;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Source */
+            source: string;
+            /** Text */
+            text: string;
         };
         /**
          * CaseRelationshipSchema
@@ -15864,6 +15991,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CaseMergeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_api_cases_case_id_record: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaseRecordResponse"];
                 };
             };
             /** @description Validation Error */

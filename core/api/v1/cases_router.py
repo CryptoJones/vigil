@@ -22,15 +22,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from core.auth.current_user import get_current_user
-from core.cases import case_journal_service
+from core.cases import case_journal_service, case_records_service
 from core.cases.case_evidence_service import CaseEvidenceService
 from core.cases.case_ioc_service import CaseIOCService
+from core.cases.case_state import detail_fields
 from core.cases.closure import ClosedByKind, ClosureCategory
-from core.cases.combined_state import combined_state, queue_item
+from core.cases.combined_state import queue_item
 from core.routing import Auth, RouterMeta, UnitOfWorkSession
 from core.storage.case_repository import PAGE_LIMIT, CaseRepository
 from core.storage.database_data_service import DatabaseDataService
-from core.storage.models import User
+from core.storage.models import CaseClosureInfo, User
 from core.storage.schemas import (
     CaseClosureInfoSchema,
     CaseEvidenceSchema,
@@ -319,9 +320,13 @@ async def get_cases(
 
 
 @router.get("/{case_id}", response_model=CaseDetailResponse)
-async def get_case(case_id: str):
+async def get_case(case_id: str, session: UnitOfWorkSession):
     """
     Get a specific case by ID.
+
+    ``combined_state`` is the one function the header pill reads. Investigations
+    are newest first; the audit run is ``run_id_for`` of the latest, never the
+    shadow adjudication.
 
     Args:
         case_id: The case ID
@@ -329,14 +334,14 @@ async def get_case(case_id: str):
     Returns:
         Case details
     """
-    case = data_service.get_case(case_id)
-    if not case:
+    loaded = data_service.get_case(case_id)
+    if not loaded:
         raise HTTPException(status_code=404, detail="Case not found")
-    live = None
-    if data_service.is_using_database():
-        with unit_of_work() as session:
-            live = CaseRepository(session).latest_live_status(case_id)
-    case["combined_state"] = combined_state(case.get("status"), live)
+    # Copy: a demo-mode case is the stored dict, and this read must not write it.
+    case = dict(loaded)
+    investigations = case_records_service.list_case_investigations(session, case_id)
+    closure = session.get(CaseClosureInfo, case_id)
+    case.update(detail_fields(case.get("status"), investigations, closure))
     return case
 
 
