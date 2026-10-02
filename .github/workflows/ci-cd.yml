@@ -32,6 +32,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements-dev.txt
       
       - name: Install dependencies
         run: |
@@ -118,6 +119,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements.lock
 
       - name: Install Python dependencies
         run: |
@@ -328,6 +330,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements.lock
       
       - name: Install dependencies
         run: |
@@ -551,6 +554,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements.lock
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -727,6 +731,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements.lock
 
       - name: Install dependencies
         run: |
@@ -799,6 +804,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: 'pip'
+          cache-dependency-path: requirements.lock
 
       - name: Install dependencies
         run: |
