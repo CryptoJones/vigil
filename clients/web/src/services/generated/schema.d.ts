@@ -9589,6 +9589,8 @@ export interface components {
              * @default
              */
             extra_principles: string | null;
+            /** Fallback Model */
+            fallback_model?: string | null;
             /** Icon */
             icon?: string | null;
             /**
@@ -9627,6 +9629,8 @@ export interface components {
             enable_thinking?: boolean | null;
             /** Extra Principles */
             extra_principles?: string | null;
+            /** Fallback Model */
+            fallback_model?: string | null;
             /** Icon */
             icon?: string | null;
             /** Max Tokens */
