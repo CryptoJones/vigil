@@ -16,11 +16,15 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import Float, and_
+from sqlalchemy import case as sql_case
+from sqlalchemy import cast, func, literal_column, select, true
+from sqlalchemy.sql.elements import ColumnElement
 
 from core.cases.case_metrics_service import CaseMetricsService
 from core.cases.case_sla_service import CaseSLAService
 from core.routing import Auth, RouterMeta, UnitOfWorkSession
-from core.storage.models import Case, CaseMetrics
+from core.storage.models import Case, CaseClosureInfo
 from core.storage.schemas import CaseMetricsSchema
 
 router = APIRouter()
@@ -36,6 +40,84 @@ ROUTER_META = RouterMeta(
 # contract: composite rollups whose shape will change as reporting matures. The
 # /api/v1/** contract snapshot excludes any operation carrying x-vigil-beta.
 _BETA = {"openapi_extra": {"x-vigil-beta": True}}
+
+# --- Derived timings ---------------------------------------------------------
+# MTTR, MTTD and per-analyst resolution time are computed in SQL from columns
+# every case path writes, not read from ``case_metrics``: nothing populates that
+# table in normal operation (#1435), so reading it reported 0 for every
+# deployment. The definitions are the ones ``CaseMetricsService`` uses to fill
+# ``case_metrics``, so the two agree wherever both exist.
+
+_CLOSED_STATUSES = ("resolved", "closed")
+
+# A first-activity timestamp is only cast when it looks like an ISO-8601 date
+# and time, so one malformed entry cannot fail the whole aggregate. Writers
+# store naive UTC, some with a trailing "Z"; a cast to ``timestamp`` ignores the
+# zone suffix, which is what lines them up with the naive ``created_at``.
+_ISO_DATETIME = (
+    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])[T ]([01]\d|2[0-3]):[0-5]\d"
+)
+
+
+def _closed_at() -> ColumnElement:
+    """When a resolved or closed case was closed.
+
+    ``case_closure_info.closed_at`` is stamped by ``close_case``, which every
+    close path goes through, and it does not move when the case is edited
+    afterwards. A ``resolved`` case has no closure row (and a reopened one may
+    keep a stale one), so those fall back to ``cases.updated_at`` -- the source
+    ``CaseMetricsService`` uses for ``time_to_resolve``.
+    """
+    return sql_case(
+        (
+            Case.status == "closed",
+            func.coalesce(CaseClosureInfo.closed_at, Case.updated_at),
+        ),
+        else_=Case.updated_at,
+    )
+
+
+def _first_activity_at() -> ColumnElement:
+    """The earliest timestamp in ``cases.activities``, or NULL if none."""
+    activities = sql_case(
+        (func.jsonb_typeof(Case.activities) == "array", Case.activities),
+        else_=literal_column("'[]'::jsonb"),
+    )
+    entry = func.jsonb_array_elements(activities).table_valued("value")
+    stamp = entry.c.value.op("->>")("timestamp")
+    return (
+        select(func.min(cast(stamp, Case.created_at.type)))
+        .select_from(entry)
+        .where(stamp.op("~")(_ISO_DATETIME))
+        .scalar_subquery()
+    )
+
+
+def _seconds_since_created(moment: ColumnElement) -> ColumnElement:
+    return cast(func.extract("epoch", moment - Case.created_at), Float)
+
+
+def _created_window(
+    start_date: Optional[datetime], end_date: Optional[datetime]
+) -> List[ColumnElement]:
+    filters: List[ColumnElement] = [true()]
+    if start_date:
+        filters.append(Case.created_at >= start_date)
+    if end_date:
+        filters.append(Case.created_at <= end_date)
+    return filters
+
+
+def _mean(sums: Dict[Any, List[float]], key: Any) -> Optional[float]:
+    total, count = sums.get(key, (0.0, 0))
+    return total / count if count else None
+
+
+def _add(sums: Dict[Any, List[float]], key: Any, total: Any, count: int) -> None:
+    pair = sums.setdefault(key, [0.0, 0])
+    pair[0] += total or 0.0
+    pair[1] += count
+
 
 # --- Frozen response models -------------------------------------------------
 # These six reads are the frozen contract, so their response shapes are pinned
@@ -158,78 +240,70 @@ def get_mttr(
     Returns:
         MTTR metrics by priority and trend data
     """
-    from collections import defaultdict
+    resolve = _seconds_since_created(_closed_at())
+    respond = _seconds_since_created(_first_activity_at())
+    day = func.to_char(Case.created_at, "YYYY-MM-DD")
 
-    query = session.query(Case).filter(Case.status.in_(["resolved", "closed"]))
-
-    if start_date:
-        query = query.filter(Case.created_at >= start_date)
-    if end_date:
-        query = query.filter(Case.created_at <= end_date)
+    filters = _created_window(start_date, end_date)
+    filters.append(Case.status.in_(_CLOSED_STATUSES))
     if priority:
-        query = query.filter(Case.priority == priority)
+        filters.append(Case.priority == priority)
 
-    cases = query.all()
-
-    # Calculate MTTR (time from creation to resolution)
-    mttr_by_priority = {}
-    mttr_overall = []
-    mttr_by_date = defaultdict(lambda: {"mttd": [], "mttr": []})
-
-    for case in cases:
-        metrics = (
-            session.query(CaseMetrics)
-            .filter(CaseMetrics.case_id == case.case_id)
-            .first()
+    # One grouped query. The overall, per-priority and per-day means are folded
+    # from its sums and counts, so the query count does not grow with cases.
+    rows = (
+        session.query(
+            Case.priority,
+            day,
+            func.count(),
+            func.sum(resolve),
+            func.count(resolve),
+            func.sum(respond),
+            func.count(respond),
         )
+        .outerjoin(CaseClosureInfo, CaseClosureInfo.case_id == Case.case_id)
+        .filter(and_(*filters))
+        .group_by(Case.priority, day)
+        .all()
+    )
 
-        if metrics and metrics.time_to_resolve:
-            mttr_overall.append(metrics.time_to_resolve)
+    total_cases = 0
+    overall: Dict[Any, List[float]] = {}
+    by_priority: Dict[Any, List[float]] = {}
+    by_day_mttr: Dict[Any, List[float]] = {}
+    by_day_mttd: Dict[Any, List[float]] = {}
+    for pri, date_key, count, r_sum, r_count, d_sum, d_count in rows:
+        total_cases += count
+        if not r_count:
+            continue
+        _add(overall, None, r_sum, r_count)
+        _add(by_priority, pri, r_sum, r_count)
+        _add(by_day_mttr, date_key, r_sum, r_count)
+        _add(by_day_mttd, date_key, d_sum, d_count)
 
-            # By priority
-            if case.priority not in mttr_by_priority:
-                mttr_by_priority[case.priority] = []
-            mttr_by_priority[case.priority].append(metrics.time_to_resolve)
-
-            # By date (for trends)
-            date_key = case.created_at.strftime("%Y-%m-%d")
-            mttr_by_date[date_key]["mttr"].append(
-                metrics.time_to_resolve / 3600
-            )  # hours
-
-            # Also add MTTD for trend comparison
-            if metrics.time_to_respond:
-                mttr_by_date[date_key]["mttd"].append(
-                    metrics.time_to_respond / 3600
-                )  # hours
-
-    # Calculate averages
-    avg_mttr = sum(mttr_overall) / len(mttr_overall) if mttr_overall else 0
-    avg_by_priority = {}
-    for pri, times in mttr_by_priority.items():
-        avg_by_priority[pri] = sum(times) / len(times) if times else 0
-
-    # Convert seconds to hours
-    avg_mttr_hours = avg_mttr / 3600 if avg_mttr else 0
-    avg_by_priority_hours = {k: v / 3600 for k, v in avg_by_priority.items()}
-
-    # Prepare trend data
     trend_data = []
-    for date, times in sorted(mttr_by_date.items()):
+    for date_key in sorted(by_day_mttr):
+        day_mttr = _mean(by_day_mttr, date_key)
+        day_mttd = _mean(by_day_mttd, date_key)
         trend_data.append(
             {
-                "date": date,
-                "mttd": sum(times["mttd"]) / len(times["mttd"]) if times["mttd"] else 0,
-                "mttr": sum(times["mttr"]) / len(times["mttr"]) if times["mttr"] else 0,
+                "date": date_key,
+                "mttd": day_mttd / 3600 if day_mttd is not None else 0,
+                "mttr": day_mttr / 3600 if day_mttr is not None else 0,
             }
         )
 
+    # Null, not 0, when no case in the window has a measured value: the
+    # response model allows it, and 0 reads as "resolved instantly".
+    avg_mttr = _mean(overall, None)
     return {
         "average_mttr_seconds": avg_mttr,
-        "average_mttr_hours": avg_mttr_hours,
-        "mttr_by_priority": avg_by_priority_hours,
+        "average_mttr_hours": avg_mttr / 3600 if avg_mttr is not None else None,
+        "mttr_by_priority": {
+            pri: total / count / 3600 for pri, (total, count) in by_priority.items()
+        },
         "trend_data": trend_data,
-        "total_cases": len(cases),
+        "total_cases": total_cases,
     }
 
 
@@ -321,51 +395,38 @@ def get_mttd(
     Returns:
         MTTD metrics by priority
     """
+    respond = _seconds_since_created(_first_activity_at())
 
-    query = session.query(Case)
-
-    if start_date:
-        query = query.filter(Case.created_at >= start_date)
-    if end_date:
-        query = query.filter(Case.created_at <= end_date)
+    filters = _created_window(start_date, end_date)
     if priority:
-        query = query.filter(Case.priority == priority)
+        filters.append(Case.priority == priority)
 
-    cases = query.all()
-
-    # Calculate MTTD (time from creation to first response)
-    mttd_by_priority = {}
-    mttd_overall = []
-
-    for case in cases:
-        metrics = (
-            session.query(CaseMetrics)
-            .filter(CaseMetrics.case_id == case.case_id)
-            .first()
+    rows = (
+        session.query(
+            Case.priority, func.count(), func.sum(respond), func.count(respond)
         )
+        .filter(and_(*filters))
+        .group_by(Case.priority)
+        .all()
+    )
 
-        if metrics and metrics.time_to_respond:
-            mttd_overall.append(metrics.time_to_respond)
+    total_cases = 0
+    overall: Dict[Any, List[float]] = {}
+    by_priority: Dict[Any, List[float]] = {}
+    for pri, count, d_sum, d_count in rows:
+        total_cases += count
+        if d_count:
+            _add(overall, None, d_sum, d_count)
+            _add(by_priority, pri, d_sum, d_count)
 
-            if case.priority not in mttd_by_priority:
-                mttd_by_priority[case.priority] = []
-            mttd_by_priority[case.priority].append(metrics.time_to_respond)
-
-    # Calculate averages
-    avg_mttd = sum(mttd_overall) / len(mttd_overall) if mttd_overall else 0
-    avg_by_priority = {}
-    for pri, times in mttd_by_priority.items():
-        avg_by_priority[pri] = sum(times) / len(times) if times else 0
-
-    # Convert seconds to hours
-    avg_mttd_hours = avg_mttd / 3600 if avg_mttd else 0
-    avg_by_priority_hours = {k: v / 3600 for k, v in avg_by_priority.items()}
-
+    avg_mttd = _mean(overall, None)
     return {
         "average_mttd_seconds": avg_mttd,
-        "average_mttd_hours": avg_mttd_hours,
-        "mttd_by_priority": avg_by_priority_hours,
-        "total_cases": len(cases),
+        "average_mttd_hours": avg_mttd / 3600 if avg_mttd is not None else None,
+        "mttd_by_priority": {
+            pri: total / count / 3600 for pri, (total, count) in by_priority.items()
+        },
+        "total_cases": total_cases,
     }
 
 
@@ -477,64 +538,36 @@ def get_all_analyst_performance(
     Returns:
         Performance metrics for all analysts
     """
+    analyst = func.coalesce(func.nullif(Case.assignee, ""), "unassigned")
+    is_closed = Case.status.in_(_CLOSED_STATUSES)
+    resolve = sql_case((is_closed, _seconds_since_created(_closed_at())))
 
-    query = session.query(Case)
+    rows = (
+        session.query(
+            analyst,
+            func.count(),
+            func.count(sql_case((is_closed, 1))),
+            func.avg(resolve),
+        )
+        .outerjoin(CaseClosureInfo, CaseClosureInfo.case_id == Case.case_id)
+        .filter(and_(*_created_window(start_date, end_date)))
+        .group_by(analyst)
+        .order_by(func.count().desc(), analyst)
+        .all()
+    )
 
-    if start_date:
-        query = query.filter(Case.created_at >= start_date)
-    if end_date:
-        query = query.filter(Case.created_at <= end_date)
-
-    cases = query.all()
-
-    # Group cases by analyst
-    analyst_data = {}
-    for case in cases:
-        assignee = case.assignee or "unassigned"
-
-        if assignee not in analyst_data:
-            analyst_data[assignee] = {
-                "analyst_id": assignee,
-                "analyst_name": assignee,
-                "cases_assigned": 0,
-                "cases_resolved": 0,
-                "avg_resolution_time": 0,
-                "resolution_times": [],
-            }
-
-        analyst_data[assignee]["cases_assigned"] += 1
-
-        if case.status in ["resolved", "closed"]:
-            analyst_data[assignee]["cases_resolved"] += 1
-
-            # Get resolution time
-            metrics = (
-                session.query(CaseMetrics)
-                .filter(CaseMetrics.case_id == case.case_id)
-                .first()
-            )
-
-            if metrics and metrics.time_to_resolve:
-                analyst_data[assignee]["resolution_times"].append(
-                    metrics.time_to_resolve / 3600  # Convert to hours
-                )
-
-    # Calculate averages
-    analyst_performance = []
-    for analyst_id, data in analyst_data.items():
-        if data["resolution_times"]:
-            data["avg_resolution_time"] = sum(data["resolution_times"]) / len(
-                data["resolution_times"]
-            )
-        else:
-            data["avg_resolution_time"] = 0
-
-        # Remove temporary field
-        del data["resolution_times"]
-
-        analyst_performance.append(data)
-
-    # Sort by cases assigned (descending)
-    analyst_performance.sort(key=lambda x: x["cases_assigned"], reverse=True)
+    # avg_resolution_time stays 0 rather than null for an analyst with nothing
+    # resolved: this beta route has no response model and the console types the
+    # field as a number.
+    analyst_performance = [
+        {
+            "analyst_id": name,
+            "analyst_name": name,
+            "cases_assigned": assigned,
+            "cases_resolved": resolved,
+            "avg_resolution_time": avg / 3600 if avg is not None else 0,
+        }
+        for name, assigned, resolved, avg in rows
+    ]
 
     return {"analyst_performance": analyst_performance}
