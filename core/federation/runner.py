@@ -231,9 +231,11 @@ class FederationRunner:
             url = get_settings().redis_url or DEFAULT_REDIS_URL
             r = aioredis.from_url(url, decode_responses=True)
             key = f"vigil:federation:trigger:{source_id}"
-            # GETDEL is atomic — flag is consumed on read.
-            val = await r.getdel(key)
-            await r.close()
+            try:
+                # GETDEL is atomic — flag is consumed on read.
+                val = await r.getdel(key)
+            finally:
+                await r.aclose()
             return val is not None
         except Exception:
             return False
@@ -250,10 +252,13 @@ def request_poll_now(source_id: str) -> bool:
         import redis  # type: ignore
 
         url = get_settings().redis_url or DEFAULT_REDIS_URL
-        client = redis.from_url(url, decode_responses=True)
-        client.set(
-            f"vigil:federation:trigger:{source_id}", str(int(time.time())), ex=300
-        )
+        # The context manager closes the client's pool on every path.
+        with redis.from_url(url, decode_responses=True) as client:
+            client.set(
+                f"vigil:federation:trigger:{source_id}",
+                str(int(time.time())),
+                ex=300,
+            )
         return True
     except Exception as e:
         logger.warning("request_poll_now(%s) failed: %s", source_id, e)
