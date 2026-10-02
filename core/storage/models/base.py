@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Table,
 )
@@ -64,4 +65,8 @@ case_findings = Table(
         primary_key=True,
     ),
     Column("added_at", DateTime, default=utcnow, nullable=False),
+    # The primary key leads with case_id, so it cannot serve a lookup by
+    # finding: Finding.cases (selectin on every Finding load), the ON DELETE
+    # CASCADE from findings, and "which cases hold this finding".
+    Index("idx_case_findings_finding", "finding_id", "case_id"),
 )
