@@ -44,6 +44,9 @@ Workflows are the operational core of Vigil. Each workflow chains multiple speci
 | **Full Investigation** | Investigator → MITRE Analyst → Correlator → Responder → Reporter | Deep-dive with ATT&CK mapping, cross-signal correlation, response planning, and comprehensive documentation |
 | **Threat Hunt** | Threat Hunter → Network Analyst → Malware Analyst → Threat Intel → Reporter | Hypothesis-driven hunting across network, endpoint, and threat intel — with IOC enrichment and detection recommendations |
 | **Forensic Analysis** | Forensics → Malware Analyst → Network Analyst → Reporter | Post-incident digital forensics with evidence preservation, chain-of-custody documentation suitable for legal proceedings |
+| **Root Cause Analysis** | Investigator | Start from a confirmed compromise and trace it backward event by event to where it began, recording each step only when the value that ties it to the one before checks out |
+| **Cloud Incident** | Investigator | Cloud-native incident response across AWS, Azure, and GCP: identity blast radius, IAM/role analysis, cross-account/cross-tenant pivots, and provider-aware containment |
+| **Shadow Adjudication** | Threat Hunter, Network Analyst, Threat Intel | Independent second opinion on a finding intake already admitted: tests the stated intent against the benign account and names the workflow that should have run, executing nothing |
 
 **How it works:** Say `"Run incident response on finding f-20260215-abc123"` and the system sequences four agents — triage scores the alert, investigator digs into root cause, responder submits containment actions with confidence-based approval, and reporter generates the final documentation.
 
@@ -126,17 +129,19 @@ Vigil uses the [Model Context Protocol](https://modelcontextprotocol.io/) to con
 
 | Category | Integrations | Tools |
 |----------|-------------|-------|
-| **SIEM** | Splunk | Natural language → SPL, search by IP/host/user, index listing |
-| **EDR / XDR** | CrowdStrike | Alert lookup, host isolation/unisolation, host status |
+| **SIEM** | Splunk, Azure Sentinel | Natural language → SPL, search by IP/host/user, index listing, KQL queries over Sentinel logs and incidents |
+| **EDR / XDR** | CrowdStrike, Microsoft Defender, SentinelOne, Carbon Black | Alert lookup, host isolation/unisolation, host status |
+| **Cloud Security** | AWS Security Hub | GuardDuty, Security Hub, Inspector, and IAM Access Analyzer findings |
+| **Identity** | Okta | Authentication events, suspicious sign-ins, identity-based investigation |
 | **Threat Intel** | VirusTotal, Shodan, AlienVault OTX, MISP | Hash/IP/domain/URL reputation, host recon, pulse matching, IOC search |
 | **Sandbox** | Hybrid Analysis, Joe Sandbox, ANY.RUN | File submission, report retrieval, IOC extraction |
 | **Detection Engineering** | Security-Detections-MCP | 7,200+ rules (Sigma, Splunk, Elastic, KQL), 71 tools, coverage analysis, gap identification |
 | **Ticketing** | Jira | Issue creation, updates, search |
-| **Communication** | Slack | Alerts, channel creation, file uploads |
+| **Communication** | Slack, PagerDuty | Alerts, channel creation, file uploads, on-call paging and escalation |
 | **Data Pipeline** | Cribl Stream | Log normalization, noise filtering, multi-destination routing |
 | **Core** | Vigil | Built-in SOC operations: findings, cases, approvals, hunts — the same tools an external caller reaches at `/mcp`. The finding, case and approval tools that mirror frozen `/api/v1` operations are frozen: their names and input schemas are pinned in [`tools/mcp/frozen_tools.snapshot.json`](tools/mcp/frozen_tools.snapshot.json). The rest are served under the `0.x` terms in [`SECURITY.md`](SECURITY.md#supported-versions) |
 
-**Coming soon:** AWS Security Hub, Azure Sentinel, GCP Security, Okta, Microsoft Defender, SentinelOne, Carbon Black, PagerDuty.
+**Coming soon:** GCP Security.
 
 MCP servers live in each vendor's slice as `core/integrations/<vendor>/tool.py` and are configured via the Settings UI or `mcp_config.json`. Add a new integration by adding a slice with an MCP server in it — see [vendor slices](https://vigilsoc.org/docs/vendor-slices/) — or use the built-in Custom Integration Builder to generate one from API docs.  If you build an integration that you find useful, chances are someone else will as well.  Please contribute!
 
