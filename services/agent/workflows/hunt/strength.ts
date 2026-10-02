@@ -44,7 +44,8 @@ export function openGaps(projection: Projection, hypothesisId: string): number {
     if (dispatch.status === "complete") answered.add(gapKey(dispatch));
     // Counting our own ceiling would mean a hunt that ran out of money also loses the
     // ability to conclude once it is extended, and counting an operator's stop would
-    // do the same to a hunt somebody paused.
+    // do the same to a hunt somebody paused. A worker that could not shape its answer
+    // is a defect, not a blind spot (CONTEXT.md, Visibility Gap).
     if (dispatch.status === "failed" && (dispatch.stopped_by ?? null) === null) {
       unanswered.add(gapKey(dispatch));
     }

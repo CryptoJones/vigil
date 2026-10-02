@@ -3,9 +3,10 @@ import { DEFAULT_PARK_MS, type BudgetLimits, type Refusal } from "../../contract
 import type { HuntSpec } from "./config.js";
 
 // Who stopped a dispatch, when it was not the estate. A refusal is our own governor
-// declining to pay; interrupted is the run losing its lease or an operator halting it.
-// Neither says anything about what the estate could show us.
-export type StoppedBy = Refusal["reason"] | "interrupted";
+// declining to pay; interrupted is the run losing its lease or an operator halting it;
+// emission_invalid is a worker that never answered in the schema's shape; parked is a
+// worker waiting on an approval. None says anything about what the estate could show us.
+export type StoppedBy = Refusal["reason"] | "interrupted" | "emission_invalid" | "parked";
 
 
 

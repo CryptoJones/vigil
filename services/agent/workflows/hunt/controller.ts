@@ -1956,8 +1956,9 @@ export class HuntController {
     const settled = this.ledger.projection.dispatches.get(result.dispatch_id)?.status;
     if (settled === undefined || settled === "complete") return [];
 
-    // contracts/tool.ts forbids recording our own stop as a visibility gap. The lead is
-    // handed back below instead, so an extension finds the question on the frontier.
+    // contracts/tool.ts forbids recording our own stop as a visibility gap, and a worker
+    // that could not shape its answer or parked on an approval is our stop too. The lead
+    // is handed back below instead, so a later iteration or an extension finds it.
     const ours = result.failed && (result.stopped_by ?? null) !== null;
 
     // A failed worker is evidence about visibility, not a lost turn, and the rows it
@@ -2002,7 +2003,7 @@ export class HuntController {
     });
 
     // A lead is closed when taken so it is not re-issued every iteration -- but a dispatch
-    // we stopped ourselves has no next iteration, since the run parks.
+    // we stopped ourselves never asked the estate, so the question is still unanswered.
     const takenBack = this.ledger.projection.dispatches.get(result.dispatch_id)?.question_id ?? null;
     if (ours && takenBack !== null) {
       this.ledger.patch("question", takenBack, { status: "open" });
