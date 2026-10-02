@@ -451,8 +451,8 @@ export interface Digest {
   // Entities adjacent to the focus in the graph, so a PIVOT names something the
   // evidence has actually seen rather than inventing a value.
   pivot_candidates: EntityView[];
-  // Routine records the window dropped. Named rather than discarded, so the lead
-  // knows they exist and can EXPAND one.
+  // Records the window or the bound dropped. Counted in full and named up to the
+  // policy's omitted_ids_max, most salient first, so the lead can EXPAND one.
   omitted: { count: number; evidence_ids: string[] };
   expansions: Expansion[];
   open_questions: string[];

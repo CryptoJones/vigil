@@ -59,10 +59,13 @@ function budgetLine(remaining: Digest["budget_remaining"]): string {
 export function renderDigest(digest: Digest): string {
   const budget = budgetLine(digest.budget_remaining);
   const focus = [digest.focus.entity, digest.focus.hypothesis].filter((part) => part !== null).join(" / ");
+  const { count, evidence_ids: named } = digest.omitted;
   const omitted =
-    digest.omitted.count === 0
+    count === 0
       ? ""
-      : `${digest.omitted.count} routine record(s) compressed out: ${digest.omitted.evidence_ids.join(", ")}`;
+      : named.length < count
+        ? `${count} record(s) compressed out. The ${named.length} most salient, any of which can be expanded by id: ${named.join(", ")}`
+        : `${count} record(s) compressed out: ${named.join(", ")}`;
 
   return [
     `# ${digest.hunt_name} — iteration ${digest.iteration}`,
