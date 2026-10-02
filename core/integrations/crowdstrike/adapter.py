@@ -77,18 +77,14 @@ class CrowdStrikeAdapter:
             # First run: small window, no backfill.
             cutoff = utcnow() - timedelta(minutes=1)
 
-        try:
-            detections = (
-                await asyncio.to_thread(
-                    svc.get_detections,
-                    filter_query=f"created_timestamp:>='{cutoff.isoformat()}Z'",
-                    limit=max_items,
-                )
-                or []
-            )
-        except Exception as e:
-            logger.debug("CrowdStrike fetch failed: %s", e)
-            detections = []
+        detections = await asyncio.to_thread(
+            svc.get_detections,
+            filter_query=f"created_timestamp:>='{cutoff.isoformat()}Z'",
+            limit=max_items,
+        )
+        if detections is None:
+            # Raised so the runner records a failure and keeps the cursor.
+            raise RuntimeError("CrowdStrike detections query failed")
 
         findings = []
         for det in detections[:max_items]:
