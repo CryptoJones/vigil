@@ -156,14 +156,14 @@ function carriers(observations: readonly Observation[], link: string): Observati
   return observations.filter((obs) => obs.rows.length > 0 && containsValue(obs.rows, link));
 }
 
-// Only the in-repo splunk tool can record this count. Invoke unwraps that tool's
-// envelope and journals `results`, so an empty search is no rows — not a count of
-// zero — and `| stats count` arrives as the inner row. A count above zero rejects.
+// Only the in-repo splunk tool can record this count. Its result is journaled as
+// the tool's envelope, `{count: <rows>, query, results}`, so `| stats count` arrives
+// inside `results`. A count above zero rejects.
 function countBefore(link: string, causeTime: string, observations: readonly Observation[]): Proof {
   const counts: number[] = [];
   for (const obs of observations) {
     if (obs.tool !== PROVER_TOOL || obs.rows.length === 0) continue;
-    if (!mentions(obs, link) || !mentions(obs, causeTime)) continue;
+    if (!mentions(obs, link) || !mentionsTime(obs, causeTime)) continue;
     counts.push(...countsIn(obs.rows));
   }
   if (counts.some((count) => count > 0)) return "rejected";
@@ -174,6 +174,24 @@ function countBefore(link: string, causeTime: string, observations: readonly Obs
 function mentions(obs: Observation, needle: string): boolean {
   if (needle === "") return false;
   return obs.args.includes(needle) || containsValue(obs.rows, needle);
+}
+
+// Splunk refuses an ISO time in latest=, so the count the model can actually run
+// names the cause time in epoch seconds. Either spelling of the same second counts.
+function mentionsTime(obs: Observation, at: string): boolean {
+  if (mentions(obs, at)) return true;
+  const seconds = epochOf(at);
+  if (seconds === null) return false;
+  return new RegExp(`(?<!\\d)${seconds}(?!\\d)`).test(obs.args);
+}
+
+// A time with no zone is read as UTC rather than as this process's local time.
+function epochOf(at: string): number | null {
+  const text = at.trim();
+  if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text)) return null;
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text}Z`;
+  const ms = Date.parse(zoned);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
 function countsIn(node: unknown): number[] {
@@ -188,8 +206,11 @@ function walk(node: unknown, found: number[]): void {
     return;
   }
   if (node === null || typeof node !== "object") return;
+  // The envelope's own `count` is how many rows came back, not a count of events.
+  // An envelope with no rows is not a zero.
+  const envelope = Array.isArray((node as Record<string, unknown>).results);
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    if (key === "count") {
+    if (key === "count" && !envelope) {
       const count = asCount(value);
       if (count !== null) found.push(count);
     }
