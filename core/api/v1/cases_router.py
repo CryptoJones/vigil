@@ -559,32 +559,17 @@ async def remove_finding_from_case(case_id: str, finding_id: str):
 
 
 @router.get("/stats/summary", response_model=CaseSummaryResponse)
-async def get_cases_summary():
+def get_cases_summary():
     """
     Get summary statistics for cases.
+
+    Counted and grouped in SQL over every case, so ``total`` is not capped by
+    a row limit (#1438).
 
     Returns:
         Summary statistics
     """
-    cases = data_service.get_cases()
-
-    # Calculate statistics
-    status_counts = {}
-    priority_counts = {}
-    total_count = len(cases)
-
-    for case in cases:
-        status = case.get("status", "unknown")
-        status_counts[status] = status_counts.get(status, 0) + 1
-
-        priority = case.get("priority", "unknown")
-        priority_counts[priority] = priority_counts.get(priority, 0) + 1
-
-    return {
-        "total": total_count,
-        "by_status": status_counts,
-        "by_priority": priority_counts,
-    }
+    return data_service.get_cases_summary()
 
 
 @router.post("/{case_id}/evidence", response_model=CaseEvidenceSchema)

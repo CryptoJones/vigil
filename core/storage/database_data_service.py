@@ -29,6 +29,15 @@ def _optional_score(value: Any) -> Optional[float]:
     return parsed
 
 
+def _tally(rows: List[Dict], field: str) -> Dict[str, int]:
+    """Count ``rows`` by ``field``; a missing, null or empty value is "unknown"."""
+    counts: Dict[str, int] = {}
+    for row in rows:
+        key = row.get(field) or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 class DatabaseDataService:
     # Minimum seconds between reconnection attempts when DB is unreachable.
     _RECONNECT_INTERVAL_SECONDS = 10.0
@@ -189,6 +198,25 @@ class DatabaseDataService:
                 return 0
         return 0
 
+    def get_findings_summary(self, exclusions: str = "include") -> Dict[str, Any]:
+        """``{total, by_severity, by_data_source}`` for the findings summary.
+
+        Aggregated in SQL against the database, so it is not capped by the
+        ``get_findings`` row limit (#1438). Demo mode tallies its sample rows.
+        """
+        if self._demo_mode and self._demo_service:
+            findings = self._demo_service.get_findings(10000)
+            return {
+                "total": len(findings),
+                "by_severity": _tally(findings, "severity"),
+                "by_data_source": _tally(findings, "data_source"),
+            }
+        if self._db_available:
+            summary = self._db_service.summarize_findings(exclusions=exclusions)
+            if summary is not None:
+                return summary
+        return {"total": 0, "by_severity": {}, "by_data_source": {}}
+
     def get_finding(self, finding_id: str) -> Optional[Dict]:
         if self._demo_mode and self._demo_service:
             return self._demo_service.get_finding(finding_id)
@@ -285,6 +313,25 @@ class DatabaseDataService:
                 logger.error(f"Error getting cases from DB: {e}")
                 return []
         return []
+
+    def get_cases_summary(self) -> Dict[str, Any]:
+        """``{total, by_status, by_priority}`` for the case summary.
+
+        Aggregated in SQL against the database, so it is not capped by the
+        ``get_cases`` row limit (#1438). Demo mode tallies its sample rows.
+        """
+        if self._demo_mode and self._demo_service:
+            cases = self._demo_service.get_cases(10000)
+            return {
+                "total": len(cases),
+                "by_status": _tally(cases, "status"),
+                "by_priority": _tally(cases, "priority"),
+            }
+        if self._db_available:
+            summary = self._db_service.summarize_cases()
+            if summary is not None:
+                return summary
+        return {"total": 0, "by_status": {}, "by_priority": {}}
 
     def get_case(self, case_id: str) -> Optional[Dict]:
         if self._demo_mode and self._demo_service:
