@@ -84,6 +84,9 @@ export interface Outcome<T> {
   // Set only when parked: the call the harness stopped at, and the checkpoint a
   // resolution must answer for it to go through.
   pending: Pending | null;
+  // Set only when the role answered but never in a shape the schema accepts: a defect
+  // in the emission, structured so a workflow never parses the reason to see it.
+  emission_rejected?: true;
   // True when the tool loop was stopped by the cap rather than by the model, so
   // a workflow knows the answer was reached over a truncated set of calls.
   capped: boolean;

@@ -1,6 +1,6 @@
 import { setMaxListeners } from "node:events";
 import { drain, streamTurn } from "../../core/stream.js";
-import type { Attempt, Harness } from "../../core/loop.js";
+import type { Attempt, Harness, Outcome } from "../../core/loop.js";
 import { clamp } from "../../core/security.js";
 import type { RunKind } from "../../contracts/events.js";
 import type { RoleSpec, RunSpec } from "../../core/spec.js";
@@ -18,6 +18,7 @@ import type {
   NullCheckInput,
   NullCheckResult,
   RestsOn,
+  StoppedBy,
   ToolCall,
   WorkerEvidence,
 } from "./types.js";
@@ -322,6 +323,16 @@ export class BudgetRefused extends Error {}
 // reason BudgetRefused is: a bounded re-ask cannot change it, and dies pretending it can.
 export class LeadParked extends Error {}
 
+// What stopped a worker that returned no answer, when it was not the estate. CONTEXT.md
+// says a refusal or a bad argument must never be recorded as a Visibility Gap, and a
+// worker that could not shape its answer, or one parked on an approval, is no more one.
+function stoppedBy(outcome: Outcome<unknown>): StoppedBy | null {
+  if (outcome.refusal !== null) return outcome.refusal.reason;
+  if (outcome.status === "waiting_approval") return "parked";
+  if (outcome.emission_rejected === true) return "emission_invalid";
+  return null;
+}
+
 // A failure is a result, not a throw: a worker that burned tokens and then died
 // still spent them, and the controller records the gap either way.
 export function workerDispatcher(options: AdapterOptions): WorkerDispatcher {
@@ -368,7 +379,7 @@ export function workerDispatcher(options: AdapterOptions): WorkerDispatcher {
           calls: callsOf(outcome.calls),
           failed: true,
           failure_reason: outcome.reason,
-          stopped_by: outcome.refusal?.reason ?? null,
+          stopped_by: stoppedBy(outcome),
           cost_usd,
         };
       }

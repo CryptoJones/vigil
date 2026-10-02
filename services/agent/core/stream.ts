@@ -355,7 +355,8 @@ class Run<T, Kinds extends Record<string, unknown>> {
       ].join("\n\n");
     }
 
-    return this.done("failed", null, `the role never emitted a valid answer: ${this.rejected.join(" | ")}`);
+    const outcome = this.done("failed", null, `the role never emitted a valid answer: ${this.rejected.join(" | ")}`);
+    return { ...outcome, emission_rejected: true };
   }
 
   // Prefix, then the folded history, then a tail that is never persisted. What
