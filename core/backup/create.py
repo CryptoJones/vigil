@@ -20,6 +20,7 @@ from pathlib import Path
 import psycopg2
 from psycopg2 import sql
 
+from core.backup.connection import backup_database_config
 from core.config import REPO_ROOT, get_settings, vigil_path
 from core.intent import intent_file
 from core.storage.connection import DatabaseConfig
@@ -77,7 +78,7 @@ def create_snapshot(
     _require_tool("pg_dump")
     _require_tool("pg_restore")
 
-    cfg = DatabaseConfig()
+    cfg = backup_database_config()
     priority = _priority_prefix()
     lock = _connect(cfg, autocommit=True)
     try:
@@ -109,9 +110,59 @@ def create_snapshot(
         lock.close()
 
 
+_PG_MIN_MAJOR = 16
+# Set when a client >= 16 is found off PATH. Child processes see it via
+# _child_env; resolving it must not execute the binary.
+_pg_bindir: str | None = None
+
+
 def _require_tool(name: str) -> None:
-    if shutil.which(name) is None:
+    if name in ("pg_dump", "pg_restore"):
+        resolved = _pg_client(name)
+    else:
+        resolved = shutil.which(name)
+    if resolved is None:
         raise BackupError(f"{name} is not installed")
+
+
+def _pg_client(name: str) -> str | None:
+    """A pg_dump/pg_restore whose major is at least 16, without running it.
+
+    postgresql-client-16 installs under /usr/lib/postgresql/16/bin, which is
+    not on PATH. The directory name is the major, so an older client already
+    on PATH does not win. When that directory is absent, whatever ``which``
+    finds is used and ``_require_pg_dump_version`` still rejects one older
+    than the server.
+    """
+    global _pg_bindir
+    root = Path("/usr/lib/postgresql")
+    best: tuple[int, Path] | None = None
+    if root.is_dir():
+        for path in root.glob(f"*/bin/{name}"):
+            if not os.access(path, os.X_OK):
+                continue
+            major_text = path.relative_to(root).parts[0]
+            if not major_text.isdigit():
+                continue
+            major = int(major_text)
+            if major < _PG_MIN_MAJOR:
+                continue
+            if best is None or major > best[0]:
+                best = (major, path)
+    if best is not None:
+        _pg_bindir = str(best[1].parent)
+        return str(best[1])
+    return shutil.which(name)
+
+
+def _pg_major(text: str) -> int | None:
+    marker = "(PostgreSQL)"
+    if marker not in text:
+        return None
+    head = text.split(marker, 1)[1].strip().split(".", 1)[0]
+    if not head.isdigit():
+        return None
+    return int(head)
 
 
 def _priority_prefix() -> list[str]:
@@ -171,10 +222,9 @@ def _require_pg_dump_version(
     server_major = int(cur.fetchone()[0]) // 10000
     proc = _run(priority + ["pg_dump", "--version"], env=_child_env())
     text = proc.stdout
-    marker = "(PostgreSQL)"
-    if marker not in text:
+    major = _pg_major(text)
+    if major is None:
         raise BackupError(f"could not read pg_dump version: {text.strip()}")
-    major = int(text.split(marker, 1)[1].strip().split(".", 1)[0])
     if major < server_major:
         raise BackupError(f"pg_dump {major} is older than the server ({server_major})")
 
@@ -425,6 +475,7 @@ def _restore_list(
             raise BackupError(f"verification failed: restic dump: {detail}")
         restore = subprocess.run(
             priority + ["pg_restore", "--list", str(copy)],
+            env=_child_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -463,7 +514,10 @@ def _restic_backup(
 
 def _child_env() -> dict[str, str]:
     # pg_dump and restic need PATH and locale. Config is not read from here.
-    return os.environ.copy()  # noqa: ENV001 - child process env
+    env = os.environ.copy()  # noqa: ENV001 - child process env
+    if _pg_bindir:
+        env["PATH"] = _pg_bindir + os.pathsep + env.get("PATH", "")
+    return env
 
 
 def _restic_env(passphrase: Path) -> dict[str, str]:
