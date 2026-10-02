@@ -45,7 +45,25 @@ export interface DigestPolicy {
   contrarian_max: number;
   entity_window: number;
   pivot_candidates: number;
+  // The bound. evidence_window and resurface only ever add to what the lead sees,
+  // and the salience floor promotes most of a long ledger past them, so without a
+  // ceiling the digest grows with the hunt until it alone exceeds the request size.
+  evidence_max: number;
+  questions_max: number;
+  omitted_ids_max: number;
 }
+
+// The bound's keys alone: stamped into a new run's spec so its ledger says which
+// bound it ran under, and absent from a ledger written before there was one.
+export const DIGEST_BOUNDS = {
+  // The window plus its resurfaced records, with headroom for older anomalies. At a
+  // typical record that renders to well under half the request ceiling.
+  evidence_max: 40,
+  questions_max: 20,
+  // The lead expands by id, so the ids it is shown are worth more than a count, but
+  // a full list on a long hunt is the same unbounded growth in a different section.
+  omitted_ids_max: 50,
+} as const;
 
 export const DEFAULT_DIGEST: DigestPolicy = {
   evidence_window: 25,
@@ -55,7 +73,10 @@ export const DEFAULT_DIGEST: DigestPolicy = {
   contrarian_max: 3,
   entity_window: 15,
   pivot_candidates: 5,
+  ...DIGEST_BOUNDS,
 };
+
+const UNBOUNDED = { evidence_max: Infinity, questions_max: Infinity, omitted_ids_max: Infinity };
 
 // A bag the deployment left out keeps the default, key by key: a config naming
 // one threshold should not silently drop the rest.
@@ -114,8 +135,12 @@ export function budgetsOf(spec: RunSpec): Budgets {
   };
 }
 
+// A ledger journaled before the digest was bounded names no evidence_max, and its
+// digests were built without one. It replays under the policy that built them, the
+// same way scorerOf keeps a pre-discrimination ledger on the scorer that ranked it.
 export function digestOf(spec: RunSpec): DigestPolicy {
-  return over(DEFAULT_DIGEST, spec.digest);
+  const policy = over(DEFAULT_DIGEST, spec.digest);
+  return "evidence_max" in spec.digest ? policy : { ...policy, ...UNBOUNDED };
 }
 
 export interface EnrichmentChain {
@@ -202,6 +227,8 @@ export function huntSpec(spec: RunSpec): HuntSpec {
   validateCeilings(terminationOf(spec), budgets);
   return {
     ...spec,
+    // Journaled with the run, so a replay rebuilds each digest under the same bound.
+    digest: { ...DIGEST_BOUNDS, ...spec.digest },
     budgets,
     hypothesis_loop: held["hypothesis_loop"] === true,
     hypotheses: Array.isArray(held["hypotheses"]) ? (held["hypotheses"] as string[]) : [],

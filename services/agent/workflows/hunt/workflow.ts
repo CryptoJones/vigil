@@ -7,7 +7,7 @@ import type { RunSpec } from "../../core/spec.js";
 import { BudgetRefused, disconfirmationCritic, decisionProvider, narrativeWriter, workerDispatcher } from "./adapters.js";
 import { narrativeInput, type Narrative } from "./narrative.js";
 import type { Narrator } from "./ports.js";
-import { huntSpec, recallKeysOf, verdictsOf } from "./config.js";
+import { digestOf, huntSpec, recallKeysOf, verdictsOf } from "./config.js";
 import { pendingCheckpoints } from "./checkpoints.js";
 import { HuntAlreadyTerminal, HuntController, HuntParked, resumeHunt, startHunt } from "./controller.js";
 import { createEnricher, type Tool } from "./enrich.js";
@@ -104,7 +104,9 @@ export async function runHunt(harness: Harness<HuntKinds>, options: HuntOptions)
     decisionProvider(ports),
     workerDispatcher(ports),
     options.spec.dispatch,
-    spec.sections?.["digest"] as never,
+    // The journaled spec's policy, the one replay rebuilds with: a resumed run keeps
+    // the bound it started under rather than picking up whatever ships now.
+    digestOf(ledger.projection.hunt.spec),
     createEnricher(spec, enrichmentTools(scoped, options.spec)),
     disconfirmationCritic(ports),
     // verdictsOf reads the deployment's own thresholds, which the predicate must see.
