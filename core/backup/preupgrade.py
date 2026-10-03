@@ -80,13 +80,14 @@ def _snapshot(target: str, bifrost_data: str | None) -> str | None:
         )
         return None
     dest = next((d for d in destinations if d.default), destinations[0])
-    with prepared_destination(dest) as passphrase:
+    with prepared_destination(dest) as (passphrase, extra):
         snapshot_id = create_snapshot(
             repo=dest.repo,
             passphrase_file=str(passphrase),
             bifrost_data=bifrost_data,
             kind=KIND,
             tags=(KIND,),
+            extra_env=extra,
             version=stamp,
         )
     logger.info(

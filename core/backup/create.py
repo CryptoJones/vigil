@@ -16,6 +16,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 import psycopg2
 from psycopg2 import sql
@@ -80,6 +81,7 @@ def create_snapshot(
     bifrost_data: str | None,
     kind: str = "manual",
     tags: tuple[str, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
     version: str | None = None,
 ) -> str:
     """``version`` is what the manifest records; default is the running code's."""
@@ -97,7 +99,7 @@ def create_snapshot(
         if not _try_lock(lock):
             raise BackupSkipped()
         _require_pg_dump_version(lock, priority)
-        _ensure_repo(repo, passphrase, priority)
+        _ensure_repo(repo, passphrase, priority, extra_env)
         with tempfile.TemporaryDirectory(prefix="vigil-backup-") as raw:
             staging = Path(raw)
             dump_path = staging / "db.dump"
@@ -113,7 +115,7 @@ def create_snapshot(
             _write_manifest(manifest_path, locations, counts, kind, version)
             paths = [str(manifest_path)]
             paths.extend(loc.path for loc in locations if loc.path)
-            snap = _restic_backup(repo, passphrase, paths, priority, tags)
+            snap = _restic_backup(repo, passphrase, paths, priority, tags, extra_env)
             try:
                 _verify(
                     repo,
@@ -123,11 +125,12 @@ def create_snapshot(
                     manifest_path,
                     locations,
                     priority,
+                    extra_env,
                 )
             except BackupError as exc:
                 # restic tag rewrites the snapshot id, so the tag is set on
                 # backup and a failed verify removes that snapshot instead.
-                detail = _forget_snapshot(repo, passphrase, snap, priority)
+                detail = _forget_snapshot(repo, passphrase, snap, priority, extra_env)
                 if detail:
                     raise BackupError(
                         f"{exc}; failed to remove snapshot {snap}: {detail}"
@@ -257,9 +260,14 @@ def _require_pg_dump_version(
         raise BackupError(f"pg_dump {major} is older than the server ({server_major})")
 
 
-def _ensure_repo(repo: str, passphrase: Path, priority: list[str]) -> None:
+def _ensure_repo(
+    repo: str,
+    passphrase: Path,
+    priority: list[str],
+    extra_env: Mapping[str, str] | None = None,
+) -> None:
     """Open the repository, or init it, before any dump is taken."""
-    env = _restic_env(passphrase)
+    env = _restic_env(passphrase, extra_env)
     local = _local_repo(repo)
     if local is not None and (local / "config").is_file():
         _run(priority + ["restic", "-r", repo, "cat", "config"], env=env)
@@ -452,8 +460,9 @@ def _verify(
     manifest_path: Path,
     locations: list[Location],
     priority: list[str],
+    extra_env: Mapping[str, str] | None = None,
 ) -> None:
-    env = _restic_env(passphrase)
+    env = _restic_env(passphrase, extra_env)
     _checked(priority + ["restic", "-r", repo, "check"], env=env, what="restic check")
     _checked(
         priority + ["restic", "-r", repo, "dump", "--archive", "tar", snapshot_id, "/"],
@@ -526,6 +535,7 @@ def _restic_backup(
     paths: list[str],
     priority: list[str],
     tags: tuple[str, ...],
+    extra_env: Mapping[str, str] | None = None,
 ) -> str:
     tagged: list[str] = []
     for tag in tags:
@@ -536,7 +546,7 @@ def _restic_backup(
     proc = _run(
         priority
         + ["restic", "-r", repo, "backup", "--json", *excluded, *tagged, *paths],
-        env=_restic_env(passphrase),
+        env=_restic_env(passphrase, extra_env),
         check=False,
     )
     if proc.returncode != 0:
@@ -558,12 +568,16 @@ def _restic_backup(
 
 
 def _forget_snapshot(
-    repo: str, passphrase: Path, snapshot_id: str, priority: list[str]
+    repo: str,
+    passphrase: Path,
+    snapshot_id: str,
+    priority: list[str],
+    extra_env: Mapping[str, str] | None = None,
 ) -> str | None:
     """Remove one snapshot. The detail is None when restic succeeded."""
     proc = _run(
         priority + ["restic", "-r", repo, "forget", snapshot_id],
-        env=_restic_env(passphrase),
+        env=_restic_env(passphrase, extra_env),
         check=False,
     )
     if proc.returncode != 0:
@@ -579,8 +593,12 @@ def _child_env() -> dict[str, str]:
     return env
 
 
-def _restic_env(passphrase: Path) -> dict[str, str]:
+def _restic_env(
+    passphrase: Path, extra: Mapping[str, str] | None = None
+) -> dict[str, str]:
     env = _child_env()
+    # Applied first so an entry can never override the passphrase file.
+    env.update(extra or {})
     env["RESTIC_PASSWORD_FILE"] = str(passphrase)
     return env
 
