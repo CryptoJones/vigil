@@ -208,10 +208,12 @@ async def generate_case_report(case_id: str):
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Get associated findings
+    # Get associated findings in one fetch, kept in the case's finding order;
+    # an id with no finding is skipped.
     finding_ids = case.get("finding_ids", [])
-    findings = [data_service.get_finding(fid) for fid in finding_ids]
-    findings = [f for f in findings if f]  # Filter out None values
+    linked = data_service.get_findings_by_case(case_id) if finding_ids else []
+    by_id = {f.get("finding_id"): f for f in linked}
+    findings = [by_id[fid] for fid in finding_ids if fid in by_id]
 
     # Generate report filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
