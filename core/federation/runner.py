@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.config import DEFAULT_REDIS_URL, get_settings
 from core.federation import registry, store
@@ -175,21 +175,32 @@ class FederationRunner:
             store.record_failure(source_id, str(e))
             return
 
-        new_count = 0
+        candidates = []
         for finding in result.findings:
             if not _severity_passes(finding.get("severity"), min_severity):
                 continue
             ext = finding.get("external_id") or finding.get("finding_id")
-            if not ext:
-                continue
+            if ext:
+                candidates.append((finding, ext))
+
+        # One dedup round-trip to check the batch and one to mark it.
+        enqueued: List[str] = []
+        if candidates:
             dedup = self._dedup[source_id]
-            if await dedup.is_processed(ext):
-                continue
-            # No queue means the put never happened — leave the key unmarked.
-            if not await self._enqueue(finding, source_id, dedup, ext):
-                continue
-            await dedup.mark_processed(ext)
-            new_count += 1
+            seen = await dedup.are_processed(ext for _, ext in candidates)
+            try:
+                for finding, ext in candidates:
+                    if ext in seen:
+                        continue
+                    # No queue means the put never happened — leave it unmarked.
+                    if not await self._enqueue(finding, source_id, dedup, ext):
+                        continue
+                    # A repeat of this id later in the batch is a duplicate.
+                    seen.add(ext)
+                    enqueued.append(ext)
+            finally:
+                await dedup.mark_many(enqueued)
+        new_count = len(enqueued)
 
         if new_count:
             self.stats["findings"] = self.stats.get("findings", 0) + new_count

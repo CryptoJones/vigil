@@ -135,6 +135,12 @@ class _FakeDedup:
     async def mark_processed(self, key: str) -> None:
         self.processed.add(key)
 
+    async def are_processed(self, keys) -> set:
+        return {k for k in keys if k in self.processed}
+
+    async def mark_many(self, keys) -> None:
+        self.processed.update(keys)
+
 
 @pytest.mark.asyncio
 async def test_runner_do_one_tick_filters_by_severity(monkeypatch):
