@@ -118,8 +118,7 @@ class KafkaConsumerService:
                     # getmany so we can check shutdown frequently
                     batches = await self._consumer.getmany(timeout_ms=1000)
                     for tp, msgs in batches.items():
-                        for msg in msgs:
-                            await self._handle_message(tp.topic, msg)
+                        await self._handle_batch(tp.topic, msgs)
                         # Commit offsets for this partition after processing
                         if msgs:
                             await self._consumer.commit()
@@ -146,6 +145,45 @@ class KafkaConsumerService:
 
     async def _handle_message(self, topic: str, msg) -> None:
         """Decode, dedupe, and enqueue a single Kafka message."""
+        await self._handle_batch(topic, [msg])
+
+    async def _handle_batch(self, topic: str, msgs) -> None:
+        """Decode, dedupe, and enqueue one partition's messages, in order.
+
+        The dedup set is checked once and marked once per batch rather than
+        twice per message. Ids are marked only after their put, as before.
+        """
+        findings = [f for f in (self._decode(topic, m) for m in msgs) if f]
+        seen = await self._dedup.are_processed(f["finding_id"] for f in findings)
+        enqueued: list = []
+        try:
+            for finding in findings:
+                finding_id = finding["finding_id"]
+                if finding_id in seen:
+                    self.stats["duplicates_skipped"] += 1
+                    logger.debug("Kafka: duplicate finding_id=%s skipped", finding_id)
+                    continue
+
+                finding.setdefault("data_source", f"kafka:{topic}")
+                await self._output_queue.put(
+                    {
+                        "type": "finding",
+                        "source": f"kafka:{topic}",
+                        "data": finding,
+                        "timestamp": utcnow().isoformat(),
+                        "dedup": self._dedup,
+                        "dedup_key": finding_id,
+                    }
+                )
+                # A repeat of this id later in the batch is a duplicate.
+                seen.add(finding_id)
+                enqueued.append(finding_id)
+                self.stats["messages_enqueued"] += 1
+        finally:
+            await self._dedup.mark_many(enqueued)
+
+    def _decode(self, topic: str, msg) -> Optional[Dict[str, Any]]:
+        """The message as a finding dict with an id, or None (stats updated)."""
         self.stats["messages_consumed"] += 1
         self.stats["last_message_at"] = utcnow().isoformat()
 
@@ -158,7 +196,7 @@ class KafkaConsumerService:
             self.stats["decode_errors"] += 1
             self._record_error(f"decode error on topic {topic}: {e}")
             logger.warning("Kafka: skipping malformed message on %s: %s", topic, e)
-            return
+            return None
 
         if not isinstance(finding, dict):
             self.stats["decode_errors"] += 1
@@ -167,33 +205,13 @@ class KafkaConsumerService:
                 topic,
                 type(finding).__name__,
             )
-            return
+            return None
 
-        finding_id = finding.get("finding_id")
-        if not finding_id:
+        if not finding.get("finding_id"):
             self.stats["missing_id_errors"] += 1
             logger.warning("Kafka: skipping message on %s with no finding_id", topic)
-            return
-
-        if await self._dedup.is_processed(finding_id):
-            self.stats["duplicates_skipped"] += 1
-            logger.debug("Kafka: duplicate finding_id=%s skipped", finding_id)
-            return
-
-        finding.setdefault("data_source", f"kafka:{topic}")
-
-        await self._output_queue.put(
-            {
-                "type": "finding",
-                "source": f"kafka:{topic}",
-                "data": finding,
-                "timestamp": utcnow().isoformat(),
-                "dedup": self._dedup,
-                "dedup_key": finding_id,
-            }
-        )
-        await self._dedup.mark_processed(finding_id)
-        self.stats["messages_enqueued"] += 1
+            return None
+        return finding
 
     def _record_error(self, msg: str) -> None:
         self.stats["last_error"] = msg

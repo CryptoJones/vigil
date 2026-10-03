@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 from core.config import DEFAULT_REDIS_URL, get_settings
 
@@ -111,11 +111,7 @@ class RedisDedupSet:
         now = time.time()
         r = await self._get_redis()
         if r is None:
-            self._fallback.add(finding_id)
-            if len(self._fallback) > self.max_size:
-                # FIFO-ish trim
-                for item in list(self._fallback)[: self.max_size // 2]:
-                    self._fallback.discard(item)
+            self._fallback_add(finding_id)
             return
         try:
             async with self._lock:
@@ -130,6 +126,76 @@ class RedisDedupSet:
             self._warn_fallback(f"zadd error: {e}")
             self._redis = None
             self._fallback.add(finding_id)
+
+    def _fallback_add(self, finding_id: str) -> None:
+        self._fallback.add(finding_id)
+        if len(self._fallback) > self.max_size:
+            # FIFO-ish trim
+            for item in list(self._fallback)[: self.max_size // 2]:
+                self._fallback.discard(item)
+
+    async def are_processed(self, finding_ids: Iterable[str]) -> set[str]:
+        """Batched ``is_processed``: the subset of ``finding_ids`` already seen.
+
+        One Redis round-trip (a pipeline of ``ZSCORE``, which every server
+        version supports) for the whole batch instead of one per id. Gives the
+        same answer per id as ``is_processed``, including pending forgets and
+        the in-memory fallback.
+        """
+        ids = list(dict.fromkeys(i for i in finding_ids if i))
+        pending = [i for i in ids if i in self._pending_forget]
+        for finding_id in pending:
+            if await self._remove_from_redis(finding_id):
+                self._pending_forget.discard(finding_id)
+        ids = [i for i in ids if i not in pending]
+        if not ids:
+            return set()
+        r = await self._get_redis()
+        if r is None:
+            return {i for i in ids if i in self._fallback}
+        try:
+            pipe = r.pipeline()
+            for finding_id in ids:
+                pipe.zscore(self.key, finding_id)
+            scores = await pipe.execute()
+        except Exception as e:
+            self._warn_fallback(f"zscore error: {e}")
+            self._redis = None
+            return {i for i in ids if i in self._fallback}
+        return {i for i, score in zip(ids, scores) if score is not None}
+
+    async def mark_many(self, finding_ids: Iterable[str]) -> None:
+        """Batched ``mark_processed``: one Redis round-trip for the batch.
+
+        Each id gets its own increasing timestamp, in order, as sequential
+        ``mark_processed`` calls would; a repeated id takes its last one. TTL eviction and the size cap run once
+        after the adds; that leaves the same members as running them after
+        every add, because each add is the newest entry in the set.
+        """
+        ids = [i for i in finding_ids if i]
+        if not ids:
+            return
+        self._pending_forget.difference_update(ids)
+        # Strictly increasing scores keep insertion order for the size trim;
+        # equal scores would rank by member name instead.
+        now = time.time()
+        scores = {finding_id: now + n * 1e-6 for n, finding_id in enumerate(ids)}
+        r = await self._get_redis()
+        if r is None:
+            for finding_id in ids:
+                self._fallback_add(finding_id)
+            return
+        try:
+            async with self._lock:
+                pipe = r.pipeline()
+                pipe.zadd(self.key, scores)
+                pipe.zremrangebyscore(self.key, 0, now - self.ttl_seconds)
+                pipe.zremrangebyrank(self.key, 0, -(self.max_size + 1))
+                await pipe.execute()
+        except Exception as e:
+            self._warn_fallback(f"zadd error: {e}")
+            self._redis = None
+            self._fallback.update(ids)
 
     async def forget(self, finding_id: str) -> None:
         """Drop one id so a later poll can enqueue it again.
