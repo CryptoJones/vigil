@@ -471,10 +471,31 @@ async def get_affected_entities(
 async def get_attack_time_heatmap(
     db: Session, start_time: datetime, end_time: datetime
 ) -> List[Dict[str, Any]]:
-    """Get attack time heatmap data (hour of day x day of week)."""
+    """Get attack time heatmap data (hour of day x day of week).
 
-    findings = (
-        db.query(Finding).filter(Finding.created_at.between(start_time, end_time)).all()
+    Binned in SQL on ``Finding.timestamp``. That column is nullable (LogLM
+    ingest leaves it NULL when a row has no event time), and an undated
+    finding has no hour or weekday to land in, so it is left out of the grid.
+    """
+
+    # isodow is Monday=1 .. Sunday=7; minus one (below) matches Python's
+    # weekday(). Plain dow would put Sunday at 0.
+    day_col = func.extract("isodow", Finding.timestamp).label("isodow")
+    hour_col = func.extract("hour", Finding.timestamp).label("hour")
+    rows = (
+        db.query(
+            day_col,
+            hour_col,
+            func.count().label("count"),
+            func.count().filter(Finding.severity == "critical").label("critical"),
+            func.count().filter(Finding.severity == "high").label("high"),
+        )
+        .filter(
+            Finding.created_at.between(start_time, end_time),
+            Finding.timestamp.isnot(None),
+        )
+        .group_by(day_col, hour_col)
+        .all()
     )
 
     # Initialize heatmap grid (7 days x 24 hours)
@@ -485,18 +506,9 @@ async def get_attack_time_heatmap(
             heatmap[key] = {"count": 0, "critical": 0, "high": 0}
 
     # Populate heatmap
-    for finding in findings:
-        timestamp = finding.timestamp
-        day_of_week = timestamp.weekday()  # 0 = Monday
-        hour = timestamp.hour
-
-        key = f"{day_of_week}:{hour}"
-        heatmap[key]["count"] += 1
-
-        if finding.severity == "critical":
-            heatmap[key]["critical"] += 1
-        elif finding.severity == "high":
-            heatmap[key]["high"] += 1
+    for row in rows:
+        key = f"{int(row.isodow) - 1}:{int(row.hour)}"
+        heatmap[key] = {"count": row.count, "critical": row.critical, "high": row.high}
 
     # Convert to list format
     heatmap_data = []
