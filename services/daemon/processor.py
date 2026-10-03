@@ -56,6 +56,9 @@ class FindingProcessor:
         self._claude_service = None
         self._enrichment_services = {}
         self._sandbox_submitter = None
+        # Built on the first store and reused: its constructor health-checks
+        # the database and logs, which should not happen once per finding.
+        self._ingestion_service = None
 
         # Caps concurrent background AI enrichment (not the ingest/store path).
         self._semaphore = asyncio.Semaphore(config.max_concurrent_tasks)
@@ -450,14 +453,30 @@ class FindingProcessor:
         if dedup is not None and dedup_key:
             await dedup.forget(dedup_key)
 
+    async def _get_ingestion_service(self):
+        """Return the cached IngestionService, building it on first use.
+
+        A service built while the database was down is returned for this
+        call but not cached, so the next store health-checks again instead
+        of being stuck on a dead service.
+        """
+        if self._ingestion_service is not None:
+            return self._ingestion_service
+        from core.ingestion.ingestion_service import IngestionService
+
+        service = await asyncio.to_thread(IngestionService)
+        if getattr(service, "use_database", True):
+            self._ingestion_service = service
+        return service
+
     async def _store_finding(self, finding: Dict[str, Any]) -> bool:
         """Return True if persisted (or already present), False if the write
         failed — a failed store must never be counted as ingested."""
         try:
-            from core.ingestion.ingestion_service import IngestionService
-
-            ingestion = IngestionService()
-            return bool(ingestion.ingest_finding(finding))
+            ingestion = await self._get_ingestion_service()
+            # Sync DB I/O; DatabaseService opens a session per call, so it is
+            # safe to run off the event loop from several workers at once.
+            return bool(await asyncio.to_thread(ingestion.ingest_finding, finding))
         except Exception as e:
             logger.error(f"Failed to store finding: {e}")
             return False
