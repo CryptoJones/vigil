@@ -452,35 +452,29 @@ def get_by_priority(
         Case counts broken down by priority
     """
 
-    query = session.query(Case)
-
-    if start_date:
-        query = query.filter(Case.created_at >= start_date)
-    if end_date:
-        query = query.filter(Case.created_at <= end_date)
-
-    cases = query.all()
-
-    # Count by priority and status
-    priority_data = {}
-    for case in cases:
-        priority = case.priority or "unknown"
-
-        if priority not in priority_data:
-            priority_data[priority] = {
-                "priority": priority,
-                "count": 0,
-                "closed_count": 0,
-            }
-
-        priority_data[priority]["count"] += 1
-        if case.status in ["resolved", "closed"]:
-            priority_data[priority]["closed_count"] += 1
+    # One grouped query: count rows per priority in SQL rather than loading
+    # every case (and its selectin findings) just to tally them.
+    priority = func.coalesce(func.nullif(Case.priority, ""), "unknown")
+    rows = (
+        session.query(
+            priority,
+            func.count(),
+            func.count(sql_case((Case.status.in_(_CLOSED_STATUSES), 1))),
+        )
+        .filter(and_(*_created_window(start_date, end_date)))
+        .group_by(priority)
+        .order_by(priority)
+        .all()
+    )
 
     # Sort by priority order
     priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
     priority_breakdown = sorted(
-        priority_data.values(), key=lambda x: priority_order.get(x["priority"], 99)
+        (
+            {"priority": name, "count": count, "closed_count": closed}
+            for name, count, closed in rows
+        ),
+        key=lambda x: priority_order.get(x["priority"], 99),
     )
 
     return {"priority_breakdown": priority_breakdown}
@@ -503,26 +497,16 @@ def get_by_status(
         Case counts broken down by status
     """
 
-    query = session.query(Case)
+    status = func.coalesce(func.nullif(Case.status, ""), "unknown")
+    rows = (
+        session.query(status, func.count())
+        .filter(and_(*_created_window(start_date, end_date)))
+        .group_by(status)
+        .order_by(status)
+        .all()
+    )
 
-    if start_date:
-        query = query.filter(Case.created_at >= start_date)
-    if end_date:
-        query = query.filter(Case.created_at <= end_date)
-
-    cases = query.all()
-
-    # Count by status
-    status_data = {}
-    for case in cases:
-        status = case.status or "unknown"
-
-        if status not in status_data:
-            status_data[status] = {"status": status, "count": 0}
-
-        status_data[status]["count"] += 1
-
-    status_breakdown = list(status_data.values())
+    status_breakdown = [{"status": name, "count": count} for name, count in rows]
 
     return {"status_breakdown": status_breakdown}
 
