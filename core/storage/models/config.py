@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -340,6 +341,14 @@ class ThreatIndicator(Base):
     )
 
     __table_args__ = (
+        # Mirrors 14_threat_indicators.sql so a create_all database dedupes
+        # the same way an init-SQL one does.
+        UniqueConstraint(
+            "source",
+            "indicator_type",
+            "indicator_value",
+            name="threat_indicators_unique",
+        ),
         Index("idx_threat_indicators_type_value", "indicator_type", "indicator_value"),
         Index("idx_threat_indicators_source", "source"),
         Index("idx_threat_indicators_last_seen", "last_seen"),
