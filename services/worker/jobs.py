@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import socket
 from typing import Any, Dict, Optional
 
 from core.config import get_settings
@@ -223,3 +224,14 @@ class WorkerSettings:
     max_tries = 3
     on_startup = on_startup
     on_shutdown = on_shutdown
+    # The Helm liveness probe runs `arq --check` against this key. ARQ's default
+    # interval is 3600 s, which would leave a wedged worker undetected for an
+    # hour; the key now lives health_check_interval + 1 s and is rewritten from
+    # the poll loop, so it lapses ~31 s after the loop stops turning.
+    health_check_interval = 30
+    # Per pod, not ARQ's per-queue default: replicas share the queue, so with a
+    # shared key one healthy replica would vouch for a wedged one, and any
+    # replica's clean shutdown (Worker.close deletes the key) would fail every
+    # other replica's probe. The probe execs in the same container, so it
+    # resolves the same hostname.
+    health_check_key = f"{QUEUE_NAME}:health-check:{socket.gethostname()}"
