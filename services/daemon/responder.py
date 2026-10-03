@@ -2,12 +2,12 @@
 
 import asyncio
 import logging
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from core.response.approval_service import ApprovalService
 from core.response.autonomous_response_service import AutonomousResponseService
 from core.response.config import response_action_decision
-from core.time import utcnow
 from services.daemon.config import EscalationConfig, ResponseConfig
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ class AutonomousResponder:
                             "title": f"🚨 SOC Alert - {severity.upper()}",
                             "text": message,
                             "footer": "AI-SOC Daemon",
-                            "ts": utcnow().timestamp(),
+                            "ts": time.time(),
                         }
                     ],
                 },
