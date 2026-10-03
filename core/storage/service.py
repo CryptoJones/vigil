@@ -1039,12 +1039,13 @@ class DatabaseService:
             with self.db_manager.session_scope() as session:
                 since = utcnow() - timedelta(days=days)
 
-                query = session.query(AIDecisionLog).filter(
-                    AIDecisionLog.timestamp >= since
-                )
-
+                # One filter set shared by every query below, so the totals,
+                # averages and outcome breakdown all describe the same rows.
+                base_filters = [AIDecisionLog.timestamp >= since]
                 if agent_id:
-                    query = query.filter(AIDecisionLog.agent_id == agent_id)
+                    base_filters.append(AIDecisionLog.agent_id == agent_id)
+
+                query = session.query(AIDecisionLog).filter(*base_filters)
 
                 # Total decisions
                 total_decisions = query.count()
@@ -1059,19 +1060,12 @@ class DatabaseService:
                 ).count()
 
                 # Average grades
-                avg_accuracy = session.query(
-                    func.avg(AIDecisionLog.accuracy_grade)
-                ).filter(
-                    AIDecisionLog.timestamp >= since,
-                    AIDecisionLog.accuracy_grade.isnot(None),
+                avg_accuracy = (
+                    session.query(func.avg(AIDecisionLog.accuracy_grade))
+                    .filter(*base_filters, AIDecisionLog.accuracy_grade.isnot(None))
+                    .scalar()
+                    or 0
                 )
-
-                if agent_id:
-                    avg_accuracy = avg_accuracy.filter(
-                        AIDecisionLog.agent_id == agent_id
-                    )
-
-                avg_accuracy = avg_accuracy.scalar() or 0
 
                 # Outcome counts
                 outcomes = {}
@@ -1079,29 +1073,19 @@ class DatabaseService:
                     session.query(
                         AIDecisionLog.actual_outcome, func.count(AIDecisionLog.id)
                     )
-                    .filter(
-                        AIDecisionLog.timestamp >= since,
-                        AIDecisionLog.actual_outcome.isnot(None),
-                    )
+                    .filter(*base_filters, AIDecisionLog.actual_outcome.isnot(None))
                     .group_by(AIDecisionLog.actual_outcome)
                     .all()
                 ):
                     outcomes[outcome] = count
 
                 # Time saved
-                total_time_saved = session.query(
-                    func.sum(AIDecisionLog.time_saved_minutes)
-                ).filter(
-                    AIDecisionLog.timestamp >= since,
-                    AIDecisionLog.time_saved_minutes.isnot(None),
+                total_time_saved = (
+                    session.query(func.sum(AIDecisionLog.time_saved_minutes))
+                    .filter(*base_filters, AIDecisionLog.time_saved_minutes.isnot(None))
+                    .scalar()
+                    or 0
                 )
-
-                if agent_id:
-                    total_time_saved = total_time_saved.filter(
-                        AIDecisionLog.agent_id == agent_id
-                    )
-
-                total_time_saved = total_time_saved.scalar() or 0
 
                 return {
                     "total_decisions": total_decisions,
