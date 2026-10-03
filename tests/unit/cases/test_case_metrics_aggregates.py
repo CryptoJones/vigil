@@ -11,7 +11,11 @@ import pytest
 from sqlalchemy import event
 
 from core.api.v1.case_metrics_router import (
+    ByPriorityResponse,
+    ByStatusResponse,
     get_all_analyst_performance,
+    get_by_priority,
+    get_by_status,
     get_mttd,
     get_mttr,
 )
@@ -256,6 +260,87 @@ def test_analyst_performance_breakdown(session):
     ]
 
 
+def _by_status(result) -> dict:
+    # The route promises no order between statuses, so compare as a mapping.
+    rows = result["status_breakdown"]
+    assert all(set(row) == {"status", "count"} for row in rows)
+    return {row["status"]: row["count"] for row in rows}
+
+
+def test_by_priority_counts_and_closed_counts(session):
+    _seed(session)
+    _case(session, "no-priority", status="closed", priority="")
+    _case(session, "crit-1", status="new", priority="critical")
+    session.commit()
+
+    result = _run(get_by_priority, session)
+
+    # Ordered critical > high > medium > low > unknown; "" reads as unknown.
+    assert result == {
+        "priority_breakdown": [
+            {"priority": "critical", "count": 1, "closed_count": 0},
+            {"priority": "high", "count": 3, "closed_count": 2},
+            {"priority": "low", "count": 2, "closed_count": 1},
+            {"priority": "unknown", "count": 1, "closed_count": 1},
+        ]
+    }
+
+
+def test_by_status_counts(session):
+    _seed(session)
+    _case(session, "no-status", status="")
+    session.commit()
+
+    result = _run(get_by_status, session)
+
+    assert _by_status(result) == {
+        "closed": 2,
+        "resolved": 1,
+        "open": 1,
+        "investigating": 1,
+        "unknown": 1,
+    }
+
+
+def test_by_priority_and_status_respect_the_window(session):
+    _seed(session)
+    second_day = {"start_date": T0 + timedelta(hours=12)}
+    first_day = {"end_date": T0 + timedelta(hours=12)}
+
+    assert _run(get_by_priority, session, **second_day) == {
+        "priority_breakdown": [{"priority": "high", "count": 1, "closed_count": 1}]
+    }
+    assert _by_status(_run(get_by_status, session, **second_day)) == {"closed": 1}
+    assert _by_status(_run(get_by_status, session, **first_day)) == {
+        "closed": 1,
+        "resolved": 1,
+        "open": 1,
+        "investigating": 1,
+    }
+
+
+def test_by_priority_and_status_fit_their_response_models(session):
+    # The handlers are called directly above, which skips FastAPI's response
+    # validation; the declared models must accept what they return.
+    _seed(session)
+
+    priority = ByPriorityResponse.model_validate(_run(get_by_priority, session))
+    status = ByStatusResponse.model_validate(_run(get_by_status, session))
+
+    assert [row.priority for row in priority.priority_breakdown] == ["high", "low"]
+    assert sum(row.count for row in status.status_breakdown) == 5
+
+
+def test_by_priority_and_status_empty(session):
+    assert _run(get_by_priority, session) == {"priority_breakdown": []}
+    assert _run(get_by_status, session) == {"status_breakdown": []}
+
+    _seed(session)
+    window = {"start_date": T0 + timedelta(days=30)}
+    assert _run(get_by_priority, session, **window) == {"priority_breakdown": []}
+    assert _run(get_by_status, session, **window) == {"status_breakdown": []}
+
+
 def _count_queries(session, fn) -> int:
     statements = []
 
@@ -277,8 +362,10 @@ def _count_queries(session, fn) -> int:
         (get_mttr, {"priority": None}),
         (get_mttd, {"priority": None}),
         (get_all_analyst_performance, {}),
+        (get_by_priority, {}),
+        (get_by_status, {}),
     ],
-    ids=["mttr", "mttd", "analyst-performance"],
+    ids=["mttr", "mttd", "analyst-performance", "by-priority", "by-status"],
 )
 def test_query_count_does_not_grow_with_cases(session, handler, kwargs):
     def seed(prefix: str, n: int) -> None:
