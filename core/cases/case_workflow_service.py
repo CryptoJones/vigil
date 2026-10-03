@@ -267,15 +267,21 @@ class CaseWorkflowService:
 
             # Attach findings if provided
             if finding_ids:
-                from core.storage.models import Finding
+                from core.storage.case_repository import CaseRepository
 
+                # One IN query, not one per id. Walking the input keeps its
+                # order and repeats, and an unknown id is skipped as before.
+                by_id = {
+                    finding.finding_id: finding
+                    for finding in CaseRepository(session).resolve_findings(finding_ids)
+                }
                 for finding_id in finding_ids:
-                    finding = (
-                        session.query(Finding)
-                        .filter(Finding.finding_id == finding_id)
-                        .first()
-                    )
+                    finding = by_id.get(finding_id)
                     if finding:
+                        # Flush before a repeat, as the per-id query's
+                        # autoflush did, or case_findings gets the row twice.
+                        if finding in case.findings:
+                            session.flush()
                         case.findings.append(finding)
 
             logger.info(f"Created case {case_id} from template {template_id}")
