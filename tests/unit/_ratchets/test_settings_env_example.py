@@ -121,11 +121,6 @@ NOT_SETTINGS = {
     # Settings can be built, so it is read from the environment and must be
     # exported rather than set in .env.
     "VIGIL_DIR",
-    # Provider selection still handled by the DB provider registry.
-    "DEFAULT_LLM_PROVIDER",
-    "OPENAI_BASE_URL",
-    "OPENAI_ENABLED",
-    "OPENAI_ORGANIZATION",
 }
 
 
