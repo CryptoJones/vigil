@@ -323,6 +323,23 @@ def add_case_closure_actor(conn):
     """))
 
 
+# The case_findings primary key leads with case_id, so a lookup by finding --
+# Finding.cases on every Finding load, the cascade from findings -- scans the
+# table. create_all adds no index to a table that already exists, and
+# 39_case_findings_finding_index.sql only reaches a table that was there when
+# the init SQL ran, as a role that owns it.
+@migration("Create idx_case_findings_finding index")
+def create_case_findings_finding_index(conn):
+    if not _table_exists(conn, 'case_findings'):
+        return
+    if _index_exists(conn, 'idx_case_findings_finding'):
+        return
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_case_findings_finding
+        ON case_findings (finding_id, case_id);
+    """))
+
+
 # The CHECK below as Postgres 16 prints it back. A version that prints it
 # differently only makes _markers_widened() say no, and the step runs as before.
 MARKERS_ORIGIN_CHECK = (
