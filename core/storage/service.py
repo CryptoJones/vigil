@@ -431,6 +431,40 @@ class DatabaseService:
 
             return session.execute(query).scalar() or 0
 
+    @default_on_error(None)
+    def summarize_findings(
+        self, exclusions: str = "include"
+    ) -> Optional[Dict[str, Any]]:
+        """``{total, by_severity, by_data_source}`` over every matching finding.
+
+        Counted and grouped in SQL under the same exclusion filter as
+        ``count_findings``, so ``total`` agrees with the list endpoint's total
+        however many rows there are (#1438). A null or empty severity or data
+        source is bucketed as ``"unknown"``. ``None`` means the query failed.
+        """
+        with self.db_manager.session_scope() as session:
+            criteria = []
+            exclusion_filter = exclusion_view_filter(exclusions)
+            if exclusion_filter is not None:
+                criteria.append(exclusion_filter)
+
+            def grouped(column) -> Dict[str, int]:
+                counts: Dict[str, int] = {}
+                stmt = select(column, func.count()).where(*criteria).group_by(column)
+                for value, count in session.execute(stmt).all():
+                    key = value or "unknown"
+                    counts[key] = counts.get(key, 0) + int(count)
+                return counts
+
+            total = session.execute(
+                select(func.count()).select_from(Finding).where(*criteria)
+            ).scalar()
+            return {
+                "total": int(total or 0),
+                "by_severity": grouped(Finding.severity),
+                "by_data_source": grouped(Finding.data_source),
+            }
+
     @default_on_error(False)
     def update_finding(self, finding_id: str, **updates) -> bool:
         """
@@ -676,6 +710,20 @@ class DatabaseService:
                 session.expunge(case)
 
             return cases
+
+    @default_on_error(None)
+    def summarize_cases(self) -> Optional[Dict[str, Any]]:
+        """``{total, by_status, by_priority}`` over every case, counted in SQL.
+
+        ``None`` means the query failed.
+        """
+        with self.db_manager.session_scope() as session:
+            total, by_status, by_priority = CaseRepository(session).summary_counts()
+            return {
+                "total": total,
+                "by_status": by_status,
+                "by_priority": by_priority,
+            }
 
     @default_on_error(False)
     def update_case(self, case_id: str, **updates) -> bool:

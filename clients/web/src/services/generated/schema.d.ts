@@ -1741,6 +1741,9 @@ export interface paths {
          * Get Cases Summary
          * @description Get summary statistics for cases.
          *
+         *     Counted and grouped in SQL over every case, so ``total`` is not capped by
+         *     a row limit (#1438).
+         *
          *     Returns:
          *         Summary statistics
          */
@@ -3884,6 +3887,9 @@ export interface paths {
         /**
          * Get Findings Summary
          * @description Get summary statistics for findings.
+         *
+         *     Counted and grouped in SQL with the same exclusion filter as the list
+         *     endpoint, so ``total`` matches ``GET /findings`` with no row cap (#1438).
          *
          *     Returns:
          *         Summary statistics
@@ -7112,6 +7118,9 @@ export interface paths {
          * Get Cases Summary
          * @description Get summary statistics for cases.
          *
+         *     Counted and grouped in SQL over every case, so ``total`` is not capped by
+         *     a row limit (#1438).
+         *
          *     Returns:
          *         Summary statistics
          */
@@ -7369,6 +7378,9 @@ export interface paths {
         /**
          * Get Findings Summary
          * @description Get summary statistics for findings.
+         *
+         *     Counted and grouped in SQL with the same exclusion filter as the list
+         *     endpoint, so ``total`` matches ``GET /findings`` with no row cap (#1438).
          *
          *     Returns:
          *         Summary statistics

@@ -9,7 +9,7 @@ opens or closes sessions itself.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from sqlalchemy import Select, and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session
@@ -392,6 +392,27 @@ class CaseRepository:
         ).scalar_one()
         cases = self.find(limit=limit, offset=offset, order_by=order_by, **filters)
         return cases, int(total)
+
+    def summary_counts(self) -> Tuple[int, Dict[str, int], Dict[str, int]]:
+        """``(total, by_status, by_priority)`` over every case, in SQL.
+
+        Counts and groups in the database, so the numbers cover the whole
+        table rather than a loaded page of rows (#1438).
+        """
+        total = self.session.execute(select(func.count()).select_from(Case)).scalar()
+        return (
+            int(total or 0),
+            self._grouped_counts(Case.status),
+            self._grouped_counts(Case.priority),
+        )
+
+    def _grouped_counts(self, column) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        stmt = select(column, func.count()).group_by(column)
+        for value, count in self.session.execute(stmt).all():
+            key = "unknown" if value is None else value
+            counts[key] = counts.get(key, 0) + int(count)
+        return counts
 
     def latest_live_status(self, case_id: str) -> Optional[str]:
         """Status of the latest live investigation on this case, if any."""

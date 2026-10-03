@@ -235,28 +235,13 @@ def get_findings_summary(exclusions: ExclusionView = _SUMMARY_EXCLUSIONS_QUERY):
     """
     Get summary statistics for findings.
 
+    Counted and grouped in SQL with the same exclusion filter as the list
+    endpoint, so ``total`` matches ``GET /findings`` with no row cap (#1438).
+
     Returns:
         Summary statistics
     """
-    findings = data_service.get_findings(exclusions=exclusions)
-
-    severity_counts: Dict[str, int] = {}
-    data_source_counts: Dict[str, int] = {}
-    total_count = len(findings)
-
-    for finding in findings:
-        # `or`, not a get default: LogLM parquet ingest stores a null severity.
-        severity = finding.get("severity") or "unknown"
-        severity_counts[severity] = severity_counts.get(severity, 0) + 1
-
-        data_source = finding.get("data_source") or "unknown"
-        data_source_counts[data_source] = data_source_counts.get(data_source, 0) + 1
-
-    return {
-        "total": total_count,
-        "by_severity": severity_counts,
-        "by_data_source": data_source_counts,
-    }
+    return data_service.get_findings_summary(exclusions=exclusions)
 
 
 @router.patch("/{finding_id}", response_model=FindingUpdateResponse)
