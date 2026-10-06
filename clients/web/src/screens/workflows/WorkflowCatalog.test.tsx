@@ -196,7 +196,11 @@ describe('workflow catalog table', () => {
     expect(await screen.findByText('No runs yet')).toBeInTheDocument()
   })
 
-  it('names workflows whose listed agents recommend read_skill, and keeps import disabled', async () => {
+  it('names workflows whose listed agents recommend read_skill, and marks built-in skills read-only', async () => {
+    vi.mocked(skillsApi.list).mockResolvedValueOnce([
+      { name: 'executive-summary', description: 'Write the brief.', source_path: 'skills/executive-summary', bundled: true },
+      { name: 'desk-check', description: 'A copy.', source_path: 'skills/desk-check', bundled: false },
+    ])
     render(
       <MemoryRouter>
         <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
@@ -205,17 +209,21 @@ describe('workflow catalog table', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
     expect(await screen.findByText('executive-summary')).toBeInTheDocument()
+    expect(screen.getByText('desk-check')).toBeInTheDocument()
     expect(await screen.findByText('Beacon hunt, Threat hunt')).toBeInTheDocument()
     expect(screen.queryByText('Ransom reply')).toBeNull()
     expect(screen.queryByText('Phase tools only')).toBeNull()
     expect(screen.queryByText('Orphan flow')).toBeNull()
-    expect(screen.getByRole('button', { name: 'The grant offers the whole library.' })).toBeInTheDocument()
-    expect(screen.getByText('Bundled')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Import' })).toHaveAttribute('title', 'Coming in a later release')
-    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
+    // once above the grid, not on every card
+    expect(screen.getAllByText('Offered to')).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'The grant offers the whole library.' })).toHaveLength(1)
+    expect(screen.getByText('Built in')).toBeInTheDocument()
+    expect(screen.getByText('Read-only')).toBeInTheDocument()
+    expect(screen.queryByText('skills/executive-summary')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Import' })).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit executive-summary' }))
     expect(await screen.findByText(/path is unset/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
@@ -245,8 +253,12 @@ describe('workflow catalog table', () => {
     )
 
     fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit executive-summary' }))
     const name = await screen.findByDisplayValue('executive-summary')
+    const editor = screen.getByRole('dialog', { name: 'Edit executive-summary' })
+    expect(within(editor).getByText('Skill · executive-summary')).toBeInTheDocument()
+    expect(within(editor).getByText('Built in')).toBeInTheDocument()
+    expect(within(editor).getByLabelText('Steps (SKILL.md)')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     fireEvent.change(name, { target: { value: 'desk-check' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -260,6 +272,43 @@ describe('workflow catalog table', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Delete skill' })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     expect(skillsApi.delete).toHaveBeenCalledWith('desk-check')
+  })
+
+  it('builds a skill from a blank editor and refuses a name already in the list', async () => {
+    render(
+      <MemoryRouter>
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+      </MemoryRouter>,
+    )
+
+    vi.mocked(skillsApi.get).mockResolvedValueOnce({
+      name: 'executive-summary',
+      description: 'Write the brief.',
+      source_path: 'skills/executive-summary',
+      bundled: true,
+      body: '',
+      operator_root_set: true,
+    })
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
+    await screen.findByText('executive-summary')
+    fireEvent.click(screen.getByRole('button', { name: /Build a skill/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Build a skill' })
+    const name = within(dialog).getByLabelText('Name')
+    const description = within(dialog).getByLabelText('When to use it')
+    expect(within(dialog).getByText('Custom')).toBeInTheDocument()
+    expect(within(dialog).getByText('Lower case and hyphens, 64 characters at most')).toBeInTheDocument()
+    expect(name).toHaveValue('')
+    expect(name).toBeEnabled()
+    fireEvent.change(description, { target: { value: 'Does a thing.' } })
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    fireEvent.change(name, { target: { value: 'executive-summary' } })
+    expect(within(dialog).getByText(/already exists/)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    fireEvent.change(name, { target: { value: 'new-skill' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(skillsApi.save).toHaveBeenCalledWith({ name: 'new-skill', description: 'Does a thing.', body: '' })
   })
 
   it('opens a reader for the run kind and draws arrows only when the roster is an order', async () => {
