@@ -191,7 +191,7 @@ describe('workflow catalog cards', () => {
   it('draws kind, triggers, command and the week\'s numbers, and keeps the actions', async () => {
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -245,7 +245,7 @@ describe('workflow catalog cards', () => {
     ])
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -303,7 +303,7 @@ describe('workflow catalog cards', () => {
 
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -376,7 +376,7 @@ describe('workflow catalog cards', () => {
 
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -400,7 +400,7 @@ describe('workflow catalog cards', () => {
   it('builds a skill from a blank editor and refuses a name already in the list', async () => {
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -440,7 +440,7 @@ describe('workflow catalog cards', () => {
   it('opens a reader for the run kind', async () => {
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
@@ -488,7 +488,7 @@ describe('workflow catalog cards', () => {
     const heights = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(400)
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
     fireEvent.click(await screen.findByText('Cloud incident'))
@@ -503,7 +503,7 @@ describe('workflow catalog cards', () => {
   it('lists every command, marks the later rows, and runs nothing', () => {
     render(
       <MemoryRouter>
-        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} setViewFull={vi.fn()} />
+        <WorkflowsScreen openChat={vi.fn()} go={vi.fn()} goSettings={vi.fn()} openCase={vi.fn()} setViewFull={vi.fn()} />
       </MemoryRouter>,
     )
 
