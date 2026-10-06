@@ -4,6 +4,7 @@ FastAPI Backend for Vigil SOC Web Application
 Main application entry point for the REST API server.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ validate_settings_or_exit()
 from fastapi import Depends, FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -68,6 +69,7 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset(
         "/api/auth/bootstrap",
         # Health check — used by load balancers and Docker.
         "/api/health",
+        "/api/health/ready",
         # VStrike inbound receiver uses its own bearer API-key dependency.
         "/api/integrations/vstrike/findings",
     }
@@ -424,6 +426,7 @@ def _build_services(app: FastAPI):
     from core.integrations.mcp.registry import MCPRegistry
     from core.platform.demo_data_service import DemoDataService
     from core.response.approval_service import ApprovalService, register_pending_gauge
+    from core.storage.database_data_service import DatabaseDataService
     from core.workflows.custom_workflow_service import CustomWorkflowService
     from core.workflows.workflow_ai_generator import WorkflowAIGenerator
     from core.workflows.workflow_run_service import WorkflowRunService
@@ -431,6 +434,10 @@ def _build_services(app: FastAPI):
 
     app.state.mcp_client = build_mcp_client()
     set_process_mcp_client(app.state.mcp_client)
+
+    # Long-lived, so its reconnect throttle applies across health probes; a fresh
+    # service per probe would re-run init_database(create_tables=True) each time.
+    app.state.health_storage = DatabaseDataService()
 
     app.state.approvals = ApprovalService()
     register_pending_gauge(app.state.approvals)
@@ -698,10 +705,25 @@ async def metrics():
     return get_metrics_response()
 
 
-# Health check endpoint
-@app.get(f"{_CONTEXT_PATH}/api/health")
-async def health_check():
-    """Health check endpoint with storage backend info."""
+def _check_storage(service) -> tuple[dict, dict]:
+    """Blocking storage probe; run it off the event loop.
+
+    With Postgres down, a reconnect attempt waits out the connect timeout.
+    """
+    from core.config import state_dir_status
+
+    return service.get_backend_info(), state_dir_status()
+
+
+async def _health_payload(request: Request) -> dict:
+    """The health body, shared by /api/health and /api/health/ready so the
+    two cannot drift. ``status`` is "degraded" exactly when storage is
+    unavailable outside demo mode (or the storage check itself fails).
+
+    Redis and the LLM gateway are deliberately not part of this status: Redis
+    is shared, so failing readiness on it would eject every pod at once, and a
+    gateway outage does not stop findings or cases being served.
+    """
     # Read first, and in both branches: schema drift severe enough to raise
     # UndefinedColumn is exactly what sends this handler down the except path,
     # and that is the case the verdict exists to explain (#562). A plain dict
@@ -715,7 +737,7 @@ async def health_check():
     schema_block = {"state": drift["state"]} if drift is not None else None
 
     # Read before the storage check. A failure there must still report the real
-    # flags, and this handler has to answer 200 — a 500 restarts the pod.
+    # flags, and the liveness route has to answer 200 — a 500 restarts the pod.
     demo_mode = False
     auth_bypassed = False
     try:
@@ -727,12 +749,9 @@ async def health_check():
         logger.exception("Health check could not read process flags")
 
     try:
-        from core.config import state_dir_status
-        from core.storage.database_data_service import DatabaseDataService
-
-        service = DatabaseDataService()
-        backend_info = service.get_backend_info()
-        state_dir = state_dir_status()
+        backend_info, state_dir = await asyncio.to_thread(
+            _check_storage, request.app.state.health_storage
+        )
         database_available = bool(backend_info.get("database_available", False))
         # Demo mode runs without Postgres. Schema drift stays healthy; the
         # schema block already reports it.
@@ -759,9 +778,6 @@ async def health_check():
                 "demo_mode": backend_info.get("demo_mode", False),
             },
         }
-        if schema_block is not None:
-            payload["schema"] = schema_block
-        return payload
     except Exception:
         # The message can name missing tables. It stays in the log.
         logger.exception("Health check error")
@@ -772,9 +788,28 @@ async def health_check():
             "auth_bypassed": auth_bypassed,
             "storage": {"backend": "unknown", "error": "storage_check_failed"},
         }
-        if schema_block is not None:
-            payload["schema"] = schema_block
-        return payload
+    if schema_block is not None:
+        payload["schema"] = schema_block
+    return payload
+
+
+# Liveness: 200 means the process is up; ``status`` carries the health. Probes
+# that decide restarts use this, so Postgres being down must not fail it.
+@app.get(f"{_CONTEXT_PATH}/api/health")
+async def health_check(request: Request):
+    """Liveness: always HTTP 200 while the process is up; ``status`` in the
+    body reports "healthy" or "degraded" (storage backend info included)."""
+    return await _health_payload(request)
+
+
+# Readiness: same body, 503 when degraded so load balancers and kubelet take
+# the pod out of rotation without restarting it.
+@app.get(f"{_CONTEXT_PATH}/api/health/ready")
+async def health_ready(request: Request):
+    """Readiness: HTTP 503 exactly when ``/api/health`` reports "degraded"."""
+    payload = await _health_payload(request)
+    degraded = payload["status"] == "degraded"
+    return JSONResponse(payload, status_code=503 if degraded else 200)
 
 
 # Everything this process serves itself. A 404 under one of these is a miss,
