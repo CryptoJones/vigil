@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.ingestion.ack import settle_ack
 from core.ingestion.dedup import RedisDedupSet
 from core.llm.outage import report_outage, report_recovered
 from core.time import utcnow
@@ -32,6 +33,8 @@ _ENRICH_BREAKER_COOLDOWN = 120  # seconds
 # Not a re-queue — the dedup key is what lets a later poll try again.
 _STORE_ATTEMPTS = 3
 _STORE_RETRY_BACKOFF = 0.2  # seconds
+
+INPUT_QUEUE_MAXSIZE = 1000
 
 _FENCE = re.compile(r"<\s*/?\s*alert_data\s*>", re.IGNORECASE)
 
@@ -69,7 +72,9 @@ class FindingProcessor:
         # The queue-for-response line is the band's review threshold, so the
         # processor reads the same ResponseConfig the responder does (#916).
         self.response_config = response_config or ResponseConfig.from_settings()
-        self.input_queue: asyncio.Queue = asyncio.Queue()
+        # Bounded so a stalled processor holds producers back (put blocks)
+        # instead of piling findings up in memory.
+        self.input_queue: asyncio.Queue = asyncio.Queue(maxsize=INPUT_QUEUE_MAXSIZE)
         self._response_queue: Optional[asyncio.Queue] = None
 
         # Services (lazy loaded)
@@ -278,6 +283,7 @@ class FindingProcessor:
                 item.get("source"),
                 dedup=item.get("dedup"),
                 dedup_key=item.get("dedup_key"),
+                ack=item.get("ack"),
             )
         else:
             logger.warning(f"Unknown item type: {item_type}")
@@ -288,8 +294,14 @@ class FindingProcessor:
         source: Optional[str] = None,
         dedup: Optional[RedisDedupSet] = None,
         dedup_key: Optional[str] = None,
+        ack: Optional["asyncio.Future[bool]"] = None,
     ):
-        """Store a finding immediately; triage + enrich it in the background."""
+        """Store a finding immediately; triage + enrich it in the background.
+
+        ``ack`` (if the producer sent one) is settled as soon as the store
+        outcome is known, and as not-stored on any other exit, including
+        cancellation, so a producer never advances past an unstored finding.
+        """
         finding_id = finding.get("finding_id", "unknown")
         logger.debug(f"Processing finding {finding_id} from {source}")
 
@@ -310,6 +322,7 @@ class FindingProcessor:
                 await self._drop_unstored(finding_id, dedup, dedup_key)
                 return
 
+            settle_ack(ack, True)
             self.stats["processed"] += 1
             logger.info(
                 f"Stored finding {finding_id} (severity: {finding.get('severity')})"
@@ -323,6 +336,8 @@ class FindingProcessor:
         except Exception as e:
             logger.error(f"Error processing finding {finding_id}: {e}")
             self.stats["errors"] += 1
+        finally:
+            settle_ack(ack, False)  # no-op when already settled as stored
 
     async def _spawn_enrich(
         self, finding: Dict[str, Any], source: Optional[str] = None
