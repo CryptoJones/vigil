@@ -134,8 +134,6 @@ def _detection_to_finding(detection: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
 
     external_id = str(detection_id)[:128]
-    # The detection number sits past the 32-hex agent id. A fixed slice of
-    # the prefix maps every detection on one host onto one finding_id.
     finding_id = fit_id("cs-", str(detection_id), FINDING_ID_MAX)
 
     severity = _SEVERITY_MAP.get(

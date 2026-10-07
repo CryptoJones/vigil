@@ -577,8 +577,6 @@ class DataPoller:
         if not detection_id:
             return None
 
-        # Same rule as the federation adapter: a 32-character prefix drops the
-        # detection number, so later detections on one host replace the first.
         finding_id = fit_id("cs-", detection_id, FINDING_ID_MAX)
 
         # Map severity
