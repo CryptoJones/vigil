@@ -20,6 +20,7 @@ from core.federation.contract import (
     register_adapter,
 )
 from core.integrations._base.config import resolve
+from core.integrations._base.ids import FINDING_ID_MAX, fit_id
 from core.integrations.crowdstrike.descriptor import CROWDSTRIKE
 from core.time import utcnow
 
@@ -133,7 +134,9 @@ def _detection_to_finding(detection: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
 
     external_id = str(detection_id)[:128]
-    finding_id = f"cs-{external_id[:32]}"
+    # The detection number sits past the 32-hex agent id. A fixed slice of
+    # the prefix maps every detection on one host onto one finding_id.
+    finding_id = fit_id("cs-", str(detection_id), FINDING_ID_MAX)
 
     severity = _SEVERITY_MAP.get(
         detection.get("max_severity_displayname", "Medium"), "medium"
